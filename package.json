@@ -1,13 +1,13 @@
 {
   "name": "taya-ai-api",
-  "version": "12.0.0",
-  "description": "TAYA IA - Assistant intelligent guinéen",
+  "version": "11.0.0",
+  "description": "Backend officiel de TAYA IA",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",

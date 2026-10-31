@@ -49,51 +49,89 @@ if (SUPABASE_URL && SUPABASE_SECRET_KEY) {
   console.warn("Supabase non configuré");
 }
 
+// IDENTITÉ DE TAYA IA
+
 const SYSTEM_PROMPT = `
-Tu es TAYA IA, un assistant intelligent créé par Maruce en Guinée.
+Tu es TAYA IA 🇬🇳, un assistant intelligent créé par Maruce en Guinée.
 
 Tu réponds en français par défaut.
 Tu comprends plusieurs langues.
-Tu es rapide, précis, naturel et respectueux.
 
-Tu réponds directement aux questions.
-Tu expliques clairement les sujets difficiles.
-Tu aides avec les études, les sciences, la technologie,
-le développement web, les mathématiques, la rédaction
-et la créativité.
+TON COMPORTEMENT :
 
-Tu ne prétends jamais avoir effectué une action que tu n'as pas réalisée.
-Tu ne fabriques pas de faits.
-Si tu ne connais pas une information, tu le dis honnêtement.
+- Réponds directement aux questions.
+- Sois précis, naturel et rapide.
+- Explique clairement les sujets difficiles.
+- Aide avec les études, les sciences, la technologie,
+  le développement web, les mathématiques et la rédaction.
+- Ne fabrique jamais des informations.
+- Ne prétends jamais avoir effectué une action que tu n'as pas réalisée.
+
+RECHERCHE INTERNET :
+
+Tu disposes d'un outil de recherche Internet en temps réel.
+
+Utilise-le lorsque l'utilisateur demande :
+- Des informations récentes.
+- L'actualité.
+- Des résultats sportifs.
+- Des prix actuels.
+- Des informations sur une entreprise.
+- Des informations susceptibles d'avoir changé.
+- Une vérification d'information.
+- Des recherches sur Internet.
+
+Lorsque tu effectues une recherche :
+- Consulte les résultats pertinents.
+- Compare les informations lorsque nécessaire.
+- Privilégie les sources fiables.
+- Cite les sources utilisées.
+- N'invente jamais de liens.
+- Distingue les faits vérifiés des incertitudes.
+
+MÉMOIRE :
 
 Tu possèdes une mémoire conversationnelle.
+
 Utilise les informations mémorisées pour mieux comprendre
 les demandes de l'utilisateur.
-Ne prétends pas te souvenir d'informations qui ne figurent pas
-dans la conversation ou dans la mémoire fournie.
 
-Ton identité est TAYA IA 🇬🇳.
+Ne prétends pas te souvenir d'informations qui ne figurent
+pas dans la conversation ou dans la mémoire fournie.
+
+IDENTITÉ :
+
+Ton nom est TAYA IA.
+Ton créateur est Maruce.
+Tu représentes la Guinée 🇬🇳.
 `;
+
+// PAGE PRINCIPALE
 
 app.get("/", (req, res) => {
   res.json({
     name: "TAYA IA",
-    version: "3.0.0",
+    version: "4.0.0",
     status: "online",
     creator: "Maruce",
     country: "Guinée",
-    memory: Boolean(supabase)
+    memory: Boolean(supabase),
+    webSearch: true
   });
 });
+
+// ÉTAT DU SERVEUR
 
 app.get("/health", (req, res) => {
   res.json({
     status: "OK",
-    memory: Boolean(supabase)
+    memory: Boolean(supabase),
+    webSearch: true
   });
 });
 
-// Récupérer la mémoire d'un utilisateur
+// RÉCUPÉRER LA MÉMOIRE
+
 async function getMemory(userId) {
   if (!supabase || !userId) return "";
 
@@ -111,7 +149,8 @@ async function getMemory(userId) {
   return data?.memory || "";
 }
 
-// Enregistrer la mémoire
+// ENREGISTRER LA MÉMOIRE
+
 async function saveMemory(userId, memory) {
   if (!supabase || !userId) return;
 
@@ -130,8 +169,11 @@ async function saveMemory(userId, memory) {
   }
 }
 
+// RECHERCHE ET DISCUSSION IA
+
 app.post("/api/chat", async (req, res) => {
   try {
+
     if (!API_KEY) {
       return res.status(500).json({
         error: "La clé OpenRouter n'est pas configurée."
@@ -139,6 +181,7 @@ app.post("/api/chat", async (req, res) => {
     }
 
     const messages = req.body.messages;
+
     const userId = typeof req.body.userId === "string"
       ? req.body.userId.trim().slice(0, 100)
       : null;
@@ -154,6 +197,8 @@ app.post("/api/chat", async (req, res) => {
         error: "Conversation trop longue."
       });
     }
+
+    // Vérification des messages
 
     const safeMessages = messages
       .filter(m =>
@@ -178,7 +223,8 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // Charger la mémoire existante
+    // CHARGER LA MÉMOIRE
+
     const memory = await getMemory(userId);
 
     const systemMessages = [
@@ -198,28 +244,52 @@ de cet utilisateur.
 Utilise-les uniquement lorsqu'elles sont utiles.
 
 MEMOIRE :
+
 ${memory}
 `
       });
     }
 
+    // APPEL OPENROUTER AVEC RECHERCHE INTERNET
+
     const response = await fetch(
       "https://openrouter.ai/api/v1/chat/completions",
       {
         method: "POST",
+
         headers: {
           "Authorization": `Bearer ${API_KEY}`,
           "Content-Type": "application/json",
           "X-OpenRouter-Title": "TAYA IA"
         },
+
         body: JSON.stringify({
+
           model: MODEL,
+
           messages: [
             ...systemMessages,
             ...safeMessages
           ],
+
+          // OUTIL DE RECHERCHE INTERNET
+
+          tools: [
+            {
+              type: "openrouter:web_search",
+
+              parameters: {
+                engine: "auto",
+                max_results: 5,
+                max_total_results: 10,
+                max_uses: 2
+              }
+            }
+          ],
+
           temperature: 0.7,
-          max_tokens: 2000
+          max_tokens: 2500
+
         })
       }
     );
@@ -234,24 +304,73 @@ ${memory}
       });
     }
 
-    const answer = data.choices?.[0]?.message?.content;
+    const message = data.choices?.[0]?.message;
 
-    if (!answer) {
+    let answer = message?.content;
+
+    if (Array.isArray(answer)) {
+      answer = answer
+        .filter(item => item.type === "text")
+        .map(item => item.text)
+        .join("\n");
+    }
+
+    if (typeof answer !== "string" || !answer.trim()) {
       return res.status(502).json({
         error: "L'intelligence artificielle n'a pas retourné de réponse."
       });
     }
 
-    // Sauvegarder les échanges dans Supabase
+    // RÉCUPÉRER LES SOURCES INTERNET
+
+    const annotations = message?.annotations || [];
+
+    const sources = annotations
+      .filter(a =>
+        a.type === "url_citation" &&
+        a.url_citation?.url
+      )
+      .map(a => ({
+        title: a.url_citation.title || "Source Internet",
+        url: a.url_citation.url
+      }))
+      .filter(s => {
+        try {
+          return new URL(s.url).protocol === "https:";
+        } catch {
+          return false;
+        }
+      })
+      .filter((s, i, arr) =>
+        arr.findIndex(x => x.url === s.url) === i
+      )
+      .slice(0, 10);
+
+    // AJOUTER LES SOURCES À LA RÉPONSE
+
+    if (sources.length > 0) {
+
+      const sourceList = sources
+        .map(s => `- [${s.title.replace(/[$begin:math:display$$end:math:display$]/g, "")}](${s.url})`)
+        .join("\n");
+
+      answer += "\n\n### Sources consultées\n\n" + sourceList;
+    }
+
+    // SAUVEGARDER LA MÉMOIRE
+
     if (userId && supabase) {
+
       const conversation = safeMessages
         .slice(-10)
         .map(m => {
+
           const content = typeof m.content === "string"
             ? m.content
             : "[Contenu multimodal]";
 
           return `${m.role}: ${content}`;
+
         })
         .join("\n");
 
@@ -267,22 +386,45 @@ ${memory}
       await saveMemory(userId, updatedMemory);
     }
 
+    // RÉPONSE FINALE
+
     return res.json({
+
       success: true,
+
       reply: answer,
+
       model: data.model || MODEL,
-      memoryEnabled: Boolean(userId && supabase)
+
+      memoryEnabled: Boolean(userId && supabase),
+
+      webSearchEnabled: true,
+
+      sources: sources
+
     });
 
   } catch (error) {
+
     console.error("Server error:", error);
 
     return res.status(500).json({
       error: "Erreur interne du serveur TAYA IA."
     });
+
   }
 });
 
+// DÉMARRAGE
+
 app.listen(PORT, () => {
-  console.log(`TAYA IA fonctionne sur le port ${PORT}`);
+
+  console.log("--------------------------------");
+  console.log("TAYA IA V4");
+  console.log("Serveur : ONLINE");
+  console.log("Recherche Internet : ACTIVÉE");
+  console.log("Mémoire Supabase :", Boolean(supabase));
+  console.log("Créateur : Maruce 🇬🇳");
+  console.log("--------------------------------");
+
 });

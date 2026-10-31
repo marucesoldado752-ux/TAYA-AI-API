@@ -4,29 +4,63 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
-const { createClient } = require("@supabase/supabase-js");
 const crypto = require("crypto");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-const PORT = process.env.PORT || 3000;
+// =====================================
+// TAYA IA V12.0.0
+// =====================================
+
 const VERSION = "12.0.0";
+const PORT = process.env.PORT || 3000;
 
-const {
-  OPENROUTER_API_KEY,
-  AI_MODEL,
-  SUPABASE_URL,
-  SUPABASE_SECRET_KEY,
-  TAYA_ADMIN_KEY
-} = process.env;
+const API_KEY = process.env.OPENROUTER_API_KEY;
+const MODEL = process.env.AI_MODEL || "openai/gpt-4o-mini";
 
-if (
-  !OPENROUTER_API_KEY ||
-  !SUPABASE_URL ||
-  !SUPABASE_SECRET_KEY ||
-  !TAYA_ADMIN_KEY
-) {
-  console.error("Configuration manquante dans les variables Render");
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
+const ADMIN_KEY = process.env.TAYA_ADMIN_KEY;
+
+const MAX_MEMORY = 8000;
+
+// IMPORTANT : configuration du proxy Render
+app.set("trust proxy", 1);
+
+app.use(helmet());
+
+app.use(cors({
+  origin: [
+    "https://marucesoldado752-ux.github.io",
+    "http://localhost:3000",
+    "http://127.0.0.1:5500"
+  ]
+}));
+
+app.use(express.json({ limit: "15mb" }));
+
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 100,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: {
+    error: "Trop de demandes. Réessaie plus tard."
+  }
+}));
+
+// =====================================
+// CONFIGURATION SUPABASE
+// =====================================
+
+if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
+  console.error("ERREUR : configuration Supabase manquante.");
+  process.exit(1);
+}
+
+if (!ADMIN_KEY) {
+  console.error("ERREUR : TAYA_ADMIN_KEY manquante.");
   process.exit(1);
 }
 
@@ -35,240 +69,339 @@ const supabase = createClient(
   SUPABASE_SECRET_KEY,
   {
     auth: {
-      autoRefreshToken: false,
-      persistSession: false
+      persistSession: false,
+      autoRefreshToken: false
     }
   }
 );
 
-app.use(helmet({
-  crossOriginResourcePolicy: false
-}));
+console.log("Supabase connecté");
 
-app.use(cors({
-  origin: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "X-Admin-Key"
-  ]
-}));
+// =====================================
+// IDENTITÉ TAYA IA
+// =====================================
 
-app.use(express.json({ limit: "15mb" }));
+const SYSTEM_PROMPT = `
+Tu es TAYA IA 🇬🇳, un assistant intelligent créé par Maruce en Guinée.
 
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 150,
-  standardHeaders: true,
-  legacyHeaders: false
-}));
+Tu es un assistant polyvalent qui aide les utilisateurs dans leurs questions.
 
-const hash = value =>
-  crypto.createHash("sha256").update(value).digest("hex");
+RÈGLES :
+- Réponds directement à la question.
+- Sois intelligent, rapide, naturel et précis.
+- Comprends le contexte de la conversation.
+- Explique clairement les sujets difficiles.
+- Aide en programmation, technologie, sciences et études.
+- Aide à écrire, traduire, corriger et créer.
+- Ne fabrique jamais des faits.
+- Ne prétends jamais avoir effectué une action que tu n'as pas réalisée.
+- Respecte les consignes de format de l'utilisateur.
+- Réponds en français par défaut.
+- Utilise la mémoire lorsqu'elle est disponible.
+- Ne prétends jamais connaître une information absente.
 
-const normalizePhone = value =>
-  String(value || "").replace(/\D/g, "");
+Tu es TAYA IA.
+`;
 
-const normalizeName = value =>
-  String(value || "")
+// =====================================
+// OUTILS
+// =====================================
+
+function normalizeName(name) {
+  return String(name || "")
     .trim()
     .replace(/\s+/g, " ")
     .toLowerCase();
+}
 
-const cleanName = value =>
-  String(value || "").trim().replace(/\s+/g, " ");
+function normalizePhone(phone) {
+  return String(phone || "")
+    .replace(/[^\d+]/g, "");
+}
 
-const generateToken = () =>
-  crypto.randomBytes(32).toString("hex");
+function validName(name) {
+  return typeof name === "string" &&
+    name.trim().length >= 2 &&
+    name.trim().length <= 60;
+}
 
-const safeEqual = (a, b) => {
-  const first = Buffer.from(String(a || ""));
-  const second = Buffer.from(String(b || ""));
+function validPhone(phone) {
+  return typeof phone === "string" &&
+    /^\+[1-9]\d{6,14}$/.test(phone);
+}
 
-  return first.length === second.length &&
-    crypto.timingSafeEqual(first, second);
-};
+function hashToken(token) {
+  return crypto
+    .createHash("sha256")
+    .update(token)
+    .digest("hex");
+}
+
+function createToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function publicUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    phone: user.phone,
+    created_at: user.created_at
+  };
+}
 
 // =====================================
-// AUTHENTIFICATION DES UTILISATEURS
+// AUTHENTIFICATION
 // =====================================
 
 async function authenticate(req, res, next) {
   try {
     const authorization = req.headers.authorization || "";
 
-    if (!authorization.startsWith("Bearer ")) {
-      return res.status(401).json({
-        error: "Session manquante"
-      });
-    }
-
-    const token = authorization.slice(7);
+    const token = authorization.startsWith("Bearer ")
+      ? authorization.slice(7).trim()
+      : "";
 
     if (!/^[a-f0-9]{64}$/i.test(token)) {
       return res.status(401).json({
-        error: "Session invalide"
+        error: "Session invalide. Reconnecte-toi."
       });
     }
+
+    const tokenHash = hashToken(token);
 
     const { data: session, error } = await supabase
       .from("taya_sessions")
       .select("user_id, expires_at")
-      .eq("token_hash", hash(token))
+      .eq("token_hash", tokenHash)
       .maybeSingle();
 
     if (error || !session) {
       return res.status(401).json({
-        error: "Session invalide"
+        error: "Session introuvable."
       });
     }
 
-    if (new Date(session.expires_at) <= new Date()) {
+    if (new Date(session.expires_at) < new Date()) {
       await supabase
         .from("taya_sessions")
         .delete()
-        .eq("token_hash", hash(token));
+        .eq("token_hash", tokenHash);
 
       return res.status(401).json({
-        error: "Session expirée"
+        error: "Session expirée."
       });
     }
 
     const { data: user, error: userError } = await supabase
       .from("taya_users")
-      .select("id, full_name, phone, created_at")
+      .select("*")
       .eq("id", session.user_id)
-      .single();
+      .maybeSingle();
 
     if (userError || !user) {
       return res.status(401).json({
-        error: "Compte introuvable"
+        error: "Utilisateur introuvable."
       });
     }
 
     req.user = user;
-    req.tokenHash = hash(token);
+    req.tokenHash = tokenHash;
 
     next();
 
   } catch (error) {
-    console.error("Authentification:", error.message);
+    console.error("Authentification :", error.message);
 
-    res.status(500).json({
-      error: "Erreur d'authentification"
+    return res.status(500).json({
+      error: "Erreur d'authentification."
     });
   }
 }
 
 // =====================================
-// ADMINISTRATION
+// OPENROUTER
 // =====================================
 
-function authenticateAdmin(req, res, next) {
-  const key = req.headers["x-admin-key"];
-
-  if (!key || !safeEqual(key, TAYA_ADMIN_KEY)) {
-    return res.status(403).json({
-      error: "Accès administrateur refusé"
-    });
+async function callAI(messages) {
+  if (!API_KEY) {
+    throw new Error("OPENROUTER_API_KEY manquante.");
   }
 
-  next();
+  const response = await fetch(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${API_KEY}`,
+        "Content-Type": "application/json",
+        "X-OpenRouter-Title": "TAYA IA V12"
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        temperature: 0.7,
+        max_tokens: 3000
+      }),
+      signal: AbortSignal.timeout(90000)
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("OpenRouter :", data);
+
+    throw new Error(
+      data.error?.message || "Erreur du moteur IA."
+    );
+  }
+
+  const answer = data.choices?.[0]?.message?.content;
+
+  if (Array.isArray(answer)) {
+    return {
+      answer: answer
+        .filter(item => item.type === "text")
+        .map(item => item.text || "")
+        .join("\n"),
+      model: data.model || MODEL
+    };
+  }
+
+  if (typeof answer !== "string" || !answer.trim()) {
+    throw new Error("Réponse IA vide.");
+  }
+
+  return {
+    answer: answer.trim(),
+    model: data.model || MODEL
+  };
 }
 
 // =====================================
-// ACCUEIL
+// PAGE PRINCIPALE
 // =====================================
 
 app.get("/", (req, res) => {
+  res.set("Cache-Control", "no-store");
+
   res.json({
     name: "TAYA IA",
     version: VERSION,
     status: "online",
-    message: "Bienvenue sur TAYA IA 🇬🇳"
-  });
-});
-
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    version: VERSION
+    creator: "Maruce",
+    country: "Guinée 🇬🇳",
+    memory: true,
+    intelligentMemory: true,
+    memoryManagement: true,
+    webSearch: false,
+    optimized: true
   });
 });
 
 // =====================================
-// INSCRIPTION AUTOMATIQUE
+// SANTÉ DU SERVEUR
+// =====================================
+
+app.get("/health", (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  res.json({
+    status: "OK",
+    version: VERSION,
+    memory: true,
+    intelligentMemory: true,
+    memoryManagement: true,
+    webSearch: false,
+    optimized: true
+  });
+});
+
+// =====================================
+// INSCRIPTION
 // =====================================
 
 app.post("/api/register", async (req, res) => {
   try {
-    const fullName = cleanName(req.body.fullName);
-    const phone = String(req.body.phone || "").trim();
+    const name = String(req.body.name || "").trim();
+    const phone = normalizePhone(req.body.phone);
+
+    if (!validName(name)) {
+      return res.status(400).json({
+        error: "Nom invalide. Minimum 2 caractères."
+      });
+    }
+
+    if (!validPhone(phone)) {
+      return res.status(400).json({
+        error: "Numéro international invalide."
+      });
+    }
+
+    const nameNormalized = normalizeName(name);
     const phoneNormalized = normalizePhone(phone);
-    const nameNormalized = normalizeName(fullName);
 
-    if (fullName.length < 2 || fullName.length > 60) {
-      return res.status(400).json({
-        error: "Nom invalide"
-      });
-    }
-
-    if (!/^\d{6,15}$/.test(phoneNormalized)) {
-      return res.status(400).json({
-        error: "Numéro de téléphone invalide"
-      });
-    }
-
-    const { data: existing, error: searchError } = await supabase
+    const { data: existingPhone } = await supabase
       .from("taya_users")
       .select("id")
-      .or(
-        `phone_normalized.eq.${phoneNormalized},name_normalized.eq.${nameNormalized}`
-      )
-      .limit(1);
+      .eq("phone_normalized", phoneNormalized)
+      .maybeSingle();
 
-    if (searchError) throw searchError;
-
-    if (existing && existing.length > 0) {
+    if (existingPhone) {
       return res.status(409).json({
-        error: "Ce nom ou ce numéro est déjà utilisé"
+        error: "Ce numéro possède déjà un compte."
       });
     }
 
-    const { data: user, error: insertError } = await supabase
+    const { data: existingName } = await supabase
+      .from("taya_users")
+      .select("id")
+      .eq("name_normalized", nameNormalized)
+      .maybeSingle();
+
+    if (existingName) {
+      return res.status(409).json({
+        error: "Ce nom est déjà utilisé."
+      });
+    }
+
+    const { data: user, error } = await supabase
       .from("taya_users")
       .insert({
-        id: crypto.randomUUID(),
-        full_name: fullName,
+        name,
         phone,
-        phone_normalized: phoneNormalized,
         name_normalized: nameNormalized,
-        updated_at: new Date().toISOString()
+        phone_normalized: phoneNormalized
       })
-      .select("id, full_name, phone, created_at")
+      .select()
       .single();
 
-    if (insertError) {
-      if (insertError.code === "23505") {
+    if (error) {
+      console.error("Inscription :", error);
+
+      if (error.code === "23505") {
         return res.status(409).json({
-          error: "Ce nom ou ce numéro est déjà utilisé"
+          error: "Ce nom ou ce numéro est déjà utilisé."
         });
       }
 
-      throw insertError;
+      throw error;
     }
 
-    const token = generateToken();
+    const token = createToken();
+    const tokenHash = hashToken(token);
+
+    const expiresAt = new Date(
+      Date.now() + 365 * 24 * 60 * 60 * 1000
+    ).toISOString();
 
     const { error: sessionError } = await supabase
       .from("taya_sessions")
       .insert({
-        token_hash: hash(token),
         user_id: user.id,
-        expires_at: new Date(
-          Date.now() + 365 * 24 * 60 * 60 * 1000
-        ).toISOString()
+        token_hash: tokenHash,
+        expires_at: expiresAt
       });
 
     if (sessionError) {
@@ -280,111 +413,129 @@ app.post("/api/register", async (req, res) => {
       throw sessionError;
     }
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       token,
-      user
+      user: publicUser(user),
+      version: VERSION
     });
 
   } catch (error) {
-    console.error("Inscription:", error.message);
+    console.error("Register :", error);
 
-    res.status(500).json({
-      error: "Impossible de créer le compte"
+    return res.status(500).json({
+      error: "Impossible de créer le compte."
     });
   }
 });
 
 // =====================================
-// PROFIL UTILISATEUR
+// PROFIL
 // =====================================
 
 app.get("/api/profile", authenticate, (req, res) => {
   res.json({
     success: true,
-    user: req.user
+    user: publicUser(req.user)
   });
 });
 
-// Modifier le nom
+// =====================================
+// CHANGER LE NOM
+// =====================================
+
 app.put("/api/profile/name", authenticate, async (req, res) => {
   try {
-    const currentName = normalizeName(req.body.currentName);
-    const newName = cleanName(req.body.newName);
-    const confirmName = cleanName(req.body.confirmName);
+    const currentName = String(req.body.currentName || "").trim();
+    const newName = String(req.body.newName || "").trim();
+    const confirmName = String(req.body.confirmName || "").trim();
 
-    if (normalizeName(req.user.full_name) !== currentName) {
+    if (normalizeName(currentName) !== normalizeName(req.user.name)) {
       return res.status(400).json({
-        error: "Ancien nom incorrect"
+        error: "Le nom actuel est incorrect."
       });
     }
 
-    if (
-      newName.length < 2 ||
-      newName.length > 60 ||
-      normalizeName(newName) !== normalizeName(confirmName)
-    ) {
+    if (!validName(newName) || newName !== confirmName) {
       return res.status(400).json({
-        error: "Les nouveaux noms ne correspondent pas"
+        error: "Les deux nouveaux noms doivent être identiques."
+      });
+    }
+
+    const normalized = normalizeName(newName);
+
+    const { data: existing } = await supabase
+      .from("taya_users")
+      .select("id")
+      .eq("name_normalized", normalized)
+      .neq("id", req.user.id)
+      .maybeSingle();
+
+    if (existing) {
+      return res.status(409).json({
+        error: "Ce nom est déjà utilisé."
       });
     }
 
     const { data, error } = await supabase
       .from("taya_users")
       .update({
-        full_name: newName,
-        name_normalized: normalizeName(newName),
+        name: newName,
+        name_normalized: normalized,
         updated_at: new Date().toISOString()
       })
       .eq("id", req.user.id)
-      .select("id, full_name, phone, created_at")
+      .select()
       .single();
 
-    if (error) {
-      if (error.code === "23505") {
-        return res.status(409).json({
-          error: "Ce nom est déjà utilisé"
-        });
-      }
-
-      throw error;
-    }
+    if (error) throw error;
 
     res.json({
       success: true,
-      user: data
+      user: publicUser(data)
     });
 
   } catch (error) {
-    console.error("Modification nom:", error.message);
+    console.error("Modification nom :", error);
 
     res.status(500).json({
-      error: "Impossible de modifier le nom"
+      error: "Impossible de modifier le nom."
     });
   }
 });
 
-// Modifier le numéro
+// =====================================
+// CHANGER LE NUMÉRO
+// =====================================
+
 app.put("/api/profile/phone", authenticate, async (req, res) => {
   try {
     const currentPhone = normalizePhone(req.body.currentPhone);
-    const newPhone = String(req.body.newPhone || "").trim();
-    const confirmPhone = String(req.body.confirmPhone || "").trim();
+    const newPhone = normalizePhone(req.body.newPhone);
+    const confirmPhone = normalizePhone(req.body.confirmPhone);
 
-    const newNormalized = normalizePhone(newPhone);
-
-    if (normalizePhone(req.user.phone) !== currentPhone) {
+    if (currentPhone !== normalizePhone(req.user.phone)) {
       return res.status(400).json({
-        error: "Ancien numéro incorrect"
+        error: "Le numéro actuel est incorrect."
       });
     }
 
-    if (
-      !/^\d{6,15}$/.test(newNormalized) ||
-      newNormalized !== normalizePhone(confirmPhone)
-    ) {
+    if (!validPhone(newPhone) || newPhone !== confirmPhone) {
       return res.status(400).json({
-        error: "Les nouveaux numéros ne correspondent pas"
+        error: "Les deux nouveaux numéros doivent être identiques."
+      });
+    }
+
+    const { data: existing } = await supabase
+      .from("taya_users")
+      .select("id")
+      .eq("phone_normalized", newPhone)
+      .neq("id", req.user.id)
+      .maybeSingle();
+
+    if (existing) {
+      return res.status(409).json({
+        error: "Ce numéro est déjà utilisé."
       });
     }
 
@@ -392,33 +543,25 @@ app.put("/api/profile/phone", authenticate, async (req, res) => {
       .from("taya_users")
       .update({
         phone: newPhone,
-        phone_normalized: newNormalized,
+        phone_normalized: newPhone,
         updated_at: new Date().toISOString()
       })
       .eq("id", req.user.id)
-      .select("id, full_name, phone, created_at")
+      .select()
       .single();
 
-    if (error) {
-      if (error.code === "23505") {
-        return res.status(409).json({
-          error: "Ce numéro est déjà utilisé"
-        });
-      }
-
-      throw error;
-    }
+    if (error) throw error;
 
     res.json({
       success: true,
-      user: data
+      user: publicUser(data)
     });
 
   } catch (error) {
-    console.error("Modification téléphone:", error.message);
+    console.error("Modification numéro :", error);
 
     res.status(500).json({
-      error: "Impossible de modifier le numéro"
+      error: "Impossible de modifier le numéro."
     });
   }
 });
@@ -428,51 +571,68 @@ app.put("/api/profile/phone", authenticate, async (req, res) => {
 // =====================================
 
 app.post("/api/logout", authenticate, async (req, res) => {
-  const { error } = await supabase
-    .from("taya_sessions")
-    .delete()
-    .eq("token_hash", req.tokenHash);
+  try {
+    await supabase
+      .from("taya_sessions")
+      .delete()
+      .eq("token_hash", req.tokenHash);
 
-  if (error) {
-    return res.status(500).json({
-      error: "Déconnexion impossible"
+    res.json({
+      success: true,
+      message: "Déconnexion réussie."
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      error: "Erreur pendant la déconnexion."
     });
   }
-
-  res.json({
-    success: true,
-    message: "Déconnexion réussie"
-  });
 });
 
 // =====================================
-// MÉMOIRE DE TAYA IA
+// MÉMOIRE
 // =====================================
 
 app.get("/api/memory", authenticate, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("taya_memories")
-      .select("memory")
+      .select("memory, updated_at")
       .eq("user_id", req.user.id)
       .maybeSingle();
 
     if (error) throw error;
 
     res.json({
-      memory: data?.memory || ""
+      success: true,
+      memory: data?.memory || "",
+      updatedAt: data?.updated_at || null
     });
 
   } catch (error) {
+    console.error("Lecture mémoire :", error);
+
     res.status(500).json({
-      error: "Impossible de charger la mémoire"
+      error: "Impossible de lire la mémoire."
     });
   }
 });
 
 app.put("/api/memory", authenticate, async (req, res) => {
   try {
-    const memory = String(req.body.memory || "").slice(0, 20000);
+    if (typeof req.body.memory !== "string") {
+      return res.status(400).json({
+        error: "Mémoire invalide."
+      });
+    }
+
+    const memory = req.body.memory.trim();
+
+    if (memory.length > MAX_MEMORY) {
+      return res.status(413).json({
+        error: "Mémoire trop longue."
+      });
+    }
 
     const { error } = await supabase
       .from("taya_memories")
@@ -480,17 +640,22 @@ app.put("/api/memory", authenticate, async (req, res) => {
         user_id: req.user.id,
         memory,
         updated_at: new Date().toISOString()
+      }, {
+        onConflict: "user_id"
       });
 
     if (error) throw error;
 
     res.json({
-      success: true
+      success: true,
+      message: "Mémoire sauvegardée."
     });
 
   } catch (error) {
+    console.error("Sauvegarde mémoire :", error);
+
     res.status(500).json({
-      error: "Impossible de sauvegarder la mémoire"
+      error: "Impossible de sauvegarder la mémoire."
     });
   }
 });
@@ -505,39 +670,59 @@ app.delete("/api/memory", authenticate, async (req, res) => {
     if (error) throw error;
 
     res.json({
-      success: true
+      success: true,
+      message: "Mémoire effacée."
     });
 
   } catch (error) {
+    console.error("Suppression mémoire :", error);
+
     res.status(500).json({
-      error: "Impossible de supprimer la mémoire"
+      error: "Impossible d'effacer la mémoire."
     });
   }
 });
 
 // =====================================
-// INTELLIGENCE ARTIFICIELLE
+// DISCUSSION IA
 // =====================================
 
 app.post("/api/chat", authenticate, async (req, res) => {
   try {
-    if (!OPENROUTER_API_KEY) {
-      return res.status(503).json({
-        error: "Service IA indisponible"
-      });
-    }
-
     const messages = req.body.messages;
 
-    if (!Array.isArray(messages) || messages.length === 0) {
+    if (!Array.isArray(messages) || !messages.length) {
       return res.status(400).json({
-        error: "Aucun message reçu"
+        error: "Aucun message reçu."
       });
     }
 
-    if (messages.length > 60) {
+    if (messages.length > 40) {
       return res.status(400).json({
-        error: "Conversation trop longue"
+        error: "Conversation trop longue."
+      });
+    }
+
+    const safeMessages = messages
+      .filter(message =>
+        message &&
+        ["user", "assistant"].includes(message.role) &&
+        (
+          typeof message.content === "string" ||
+          Array.isArray(message.content)
+        )
+      )
+      .map(message => ({
+        role: message.role,
+        content: message.content
+      }));
+
+    if (
+      !safeMessages.length ||
+      safeMessages[safeMessages.length - 1].role !== "user"
+    ) {
+      return res.status(400).json({
+        error: "Message utilisateur manquant."
       });
     }
 
@@ -549,89 +734,41 @@ app.post("/api/chat", authenticate, async (req, res) => {
 
     const memory = memoryData?.memory || "";
 
-    const systemPrompt = `
-Tu es TAYA IA 🇬🇳, une intelligence artificielle moderne créée par Maruce.
-
-Tu aides les utilisateurs à répondre à leurs questions dans tous les domaines.
-
-Tes qualités :
-- Tu es intelligente, rapide et précise.
-- Tu réponds en français si l'utilisateur parle français.
-- Tu peux également comprendre d'autres langues.
-- Tu expliques clairement les sujets difficiles.
-- Tu aides en programmation, sciences, mathématiques, rédaction, études et créativité.
-- Tu peux écrire et corriger du code.
-- Tu ne prétends jamais avoir effectué une action que tu n'as pas faite.
-- Tu reconnais honnêtement tes limites.
-- Tu évites les introductions inutiles et réponds directement.
-
-Nom de l'utilisateur : ${req.user.full_name}
-
-Mémoire personnelle de cet utilisateur :
-${memory || "Aucune mémoire enregistrée."}
-`;
-
-    const conversation = messages.map(message => ({
-      role: ["user", "assistant"].includes(message.role)
-        ? message.role
-        : "user",
-      content: message.content
-    }));
-
-    const response = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
+    const systemMessages = [
       {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://marucesoldado752-ux.github.io/",
-          "X-Title": "TAYA IA"
-        },
-        body: JSON.stringify({
-          model: AI_MODEL || "openai/gpt-4o-mini",
-          messages: [
-            {
-              role: "system",
-              content: systemPrompt
-            },
-            ...conversation
-          ],
-          temperature: 0.7,
-          max_tokens: 4000
-        })
+        role: "system",
+        content: SYSTEM_PROMPT
       }
-    );
+    ];
 
-    const result = await response.json();
-
-    if (!response.ok) {
-      console.error("OpenRouter:", result);
-
-      return res.status(502).json({
-        error: "Le service IA rencontre un problème"
+    if (memory) {
+      systemMessages.push({
+        role: "system",
+        content: "Mémoire utile de cet utilisateur :\n" + memory
       });
     }
 
-    const answer = result.choices?.[0]?.message?.content;
-
-    if (!answer) {
-      return res.status(502).json({
-        error: "Aucune réponse reçue de l'IA"
-      });
-    }
+    const result = await callAI([
+      ...systemMessages,
+      ...safeMessages
+    ]);
 
     res.json({
       success: true,
-      answer,
-      model: result.model || AI_MODEL
+      answer: result.answer,
+      reply: result.answer,
+      model: result.model,
+      memoryEnabled: true,
+      intelligentMemory: true,
+      memoryManagement: true,
+      version: VERSION
     });
 
   } catch (error) {
-    console.error("Chat:", error.message);
+    console.error("Erreur discussion :", error);
 
     res.status(500).json({
-      error: "Une erreur est survenue pendant la discussion"
+      error: "TAYA IA n'a pas pu répondre. Réessaie."
     });
   }
 });
@@ -646,7 +783,7 @@ app.post("/api/contact", authenticate, async (req, res) => {
 
     if (!message || message.length > 5000) {
       return res.status(400).json({
-        error: "Message invalide"
+        error: "Message invalide."
       });
     }
 
@@ -654,6 +791,8 @@ app.post("/api/contact", authenticate, async (req, res) => {
       .from("taya_contact_messages")
       .insert({
         user_id: req.user.id,
+        name: req.user.name,
+        phone: req.user.phone,
         message
       });
 
@@ -661,14 +800,14 @@ app.post("/api/contact", authenticate, async (req, res) => {
 
     res.json({
       success: true,
-      message: "Message envoyé"
+      message: "Message envoyé."
     });
 
   } catch (error) {
-    console.error("Contact:", error.message);
+    console.error("Contact :", error);
 
     res.status(500).json({
-      error: "Impossible d'envoyer le message"
+      error: "Impossible d'envoyer le message."
     });
   }
 });
@@ -677,48 +816,89 @@ app.post("/api/contact", authenticate, async (req, res) => {
 // TABLEAU DE BORD ADMINISTRATEUR
 // =====================================
 
-app.get(
-  "/api/admin/dashboard",
-  authenticateAdmin,
-  async (req, res) => {
-    try {
-      const [usersResult, messagesResult] = await Promise.all([
-        supabase
-          .from("taya_users")
-          .select("id, full_name, phone, created_at, updated_at")
-          .order("created_at", { ascending: false }),
+app.get("/api/admin/dashboard", async (req, res) => {
+  try {
+    const suppliedKey = req.headers["x-admin-key"];
 
-        supabase
-          .from("taya_contact_messages")
-          .select("id, user_id, message, created_at")
-          .order("created_at", { ascending: false })
-      ]);
-
-      if (usersResult.error) throw usersResult.error;
-      if (messagesResult.error) throw messagesResult.error;
-
-      res.json({
-        success: true,
-        totalUsers: usersResult.data.length,
-        totalMessages: messagesResult.data.length,
-        users: usersResult.data,
-        messages: messagesResult.data
-      });
-
-    } catch (error) {
-      console.error("Admin:", error.message);
-
-      res.status(500).json({
-        error: "Impossible de charger le tableau de bord"
+    if (
+      typeof suppliedKey !== "string" ||
+      suppliedKey.length !== ADMIN_KEY.length ||
+      !crypto.timingSafeEqual(
+        Buffer.from(suppliedKey),
+        Buffer.from(ADMIN_KEY)
+      )
+    ) {
+      return res.status(403).json({
+        error: "Accès administrateur refusé."
       });
     }
+
+    const { data: users, error: usersError } = await supabase
+      .from("taya_users")
+      .select("id, name, phone, created_at")
+      .order("created_at", { ascending: false });
+
+    if (usersError) throw usersError;
+
+    const { data: contacts, error: contactsError } = await supabase
+      .from("taya_contact_messages")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(200);
+
+    if (contactsError) throw contactsError;
+
+    res.json({
+      success: true,
+      users: users || [],
+      contacts: contacts || [],
+      totalUsers: users?.length || 0,
+      version: VERSION
+    });
+
+  } catch (error) {
+    console.error("Dashboard admin :", error);
+
+    res.status(500).json({
+      error: "Impossible de charger le tableau de bord."
+    });
   }
-);
+});
 
 // =====================================
-// DÉMARRAGE
+// ROUTES INCONNUES
 // =====================================
 
-app.listen(PORT, () => {
-  console.log(`TAYA IA ${VERSION} démarré sur le port ${PORT}`);
+app.use((req, res) => {
+  res.status(404).json({
+    error: "Route introuvable."
+  });
+});
+
+// =====================================
+// ERREURS
+// =====================================
+
+app.use((error, req, res, next) => {
+  console.error("Erreur serveur :", error);
+
+  res.status(500).json({
+    error: "Erreur interne du serveur."
+  });
+});
+
+// =====================================
+// DÉMARRAGE RENDER
+// =====================================
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("--------------------------------");
+  console.log("TAYA IA V12.0.0 🇬🇳");
+  console.log("Serveur : ONLINE");
+  console.log("Port :", PORT);
+  console.log("Supabase : CONNECTÉ");
+  console.log("Authentification : ACTIVÉE");
+  console.log("Mémoire : ACTIVÉE");
+  console.log("Créateur : Maruce");
+  console.log("--------------------------------");
 });

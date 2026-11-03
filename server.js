@@ -5,12 +5,13 @@ const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-const VERSION = "12.0.0";
+const VERSION = "12.1.0";
 
 const {
   OPENROUTER_API_KEY,
@@ -50,14 +51,33 @@ app.use(cors({
 
 app.use(express.json({ limit: "20mb" }));
 
-const limiter = rateLimit({
+const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 40,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  message: { error: "Trop de requêtes. Réessaie plus tard." }
 });
 
-app.use("/api", limiter);
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "Trop de tentatives. Réessaie dans 15 minutes."
+  }
+});
+
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Trop de tentatives administrateur." }
+});
+
+app.use("/api", generalLimiter);
 
 function errorMessage(res, status, message) {
   return res.status(status).json({ error: message });
@@ -69,7 +89,7 @@ function checkConfiguration() {
   }
 
   if (!JWT_SECRET || JWT_SECRET.length < 32) {
-    throw new Error("JWT_SECRET doit contenir au moins 32 caractères");
+    throw new Error("JWT_SECRET invalide");
   }
 }
 
@@ -79,6 +99,14 @@ function normalizePhone(phone) {
 
 function validPhone(phone) {
   return /^\+[1-9]\d{6,14}$/.test(phone);
+}
+
+function validPassword(password) {
+  if (typeof password !== "string") return false;
+
+  const bytes = Buffer.byteLength(password, "utf8");
+
+  return password.length >= 10 && bytes <= 72;
 }
 
 function createToken(user) {
@@ -103,6 +131,7 @@ function authenticate(req, res, next) {
     checkConfiguration();
 
     const authorization = req.headers.authorization || "";
+
     const token = authorization.startsWith("Bearer ")
       ? authorization.slice(7)
       : "";
@@ -112,9 +141,15 @@ function authenticate(req, res, next) {
     }
 
     const decoded = jwt.verify(token, JWT_SECRET);
+
+    if (!decoded.userId) {
+      return errorMessage(res, 401, "Session invalide");
+    }
+
     req.userId = decoded.userId;
 
     next();
+
   } catch (error) {
     return errorMessage(res, 401, "Session invalide ou expirée");
   }
@@ -128,6 +163,7 @@ async function getUser(userId) {
     .single();
 
   if (error || !data) return null;
+
   return data;
 }
 
@@ -152,13 +188,15 @@ app.get("/health", (req, res) => {
   });
 });
 
-// INSCRIPTION
-app.post("/api/register", async (req, res) => {
+// INSCRIPTION SÉCURISÉE
+app.post("/api/register", authLimiter, async (req, res) => {
   try {
     checkConfiguration();
 
     const fullName = String(req.body.fullName || "").trim();
     const phone = normalizePhone(req.body.phone);
+    const password = req.body.password;
+    const confirmPassword = req.body.confirmPassword;
 
     if (fullName.length < 2 || fullName.length > 80) {
       return errorMessage(res, 400, "Nom invalide");
@@ -168,7 +206,78 @@ app.post("/api/register", async (req, res) => {
       return errorMessage(res, 400, "Numéro de téléphone invalide");
     }
 
-    let { data: user, error } = await supabase
+    if (!validPassword(password)) {
+      return errorMessage(
+        res,
+        400,
+        "Le mot de passe doit contenir au moins 10 caractères et respecter la limite autorisée"
+      );
+    }
+
+    if (password !== confirmPassword) {
+      return errorMessage(res, 400, "Les mots de passe ne correspondent pas");
+    }
+
+    const { data: existingUser, error: searchError } = await supabase
+      .from("taya_v12_users")
+      .select("id")
+      .eq("phone", phone)
+      .maybeSingle();
+
+    if (searchError) throw searchError;
+
+    if (existingUser) {
+      return errorMessage(
+        res,
+        409,
+        "Ce numéro possède déjà un compte. Connecte-toi."
+      );
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const { data: user, error } = await supabase
+      .from("taya_v12_users")
+      .insert({
+        full_name: fullName,
+        phone,
+        password_hash: passwordHash
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      if (error.code === "23505") {
+        return errorMessage(res, 409, "Ce numéro est déjà utilisé");
+      }
+
+      throw error;
+    }
+
+    res.status(201).json({
+      token: createToken(user),
+      user: publicUser(user)
+    });
+
+  } catch (error) {
+    console.error("REGISTER:", error.message);
+    errorMessage(res, 500, "Impossible de créer le compte");
+  }
+});
+
+// CONNEXION SÉCURISÉE
+app.post("/api/login", authLimiter, async (req, res) => {
+  try {
+    checkConfiguration();
+
+    const phone = normalizePhone(req.body.phone);
+    const password = req.body.password;
+
+    if (!validPhone(phone) || typeof password !== "string") {
+      return errorMessage(res, 400, "Identifiants invalides");
+    }
+
+    const { data: user, error } = await supabase
       .from("taya_v12_users")
       .select("*")
       .eq("phone", phone)
@@ -176,30 +285,139 @@ app.post("/api/register", async (req, res) => {
 
     if (error) throw error;
 
-    if (!user) {
-      const result = await supabase
-        .from("taya_v12_users")
-        .insert({
-          full_name: fullName,
-          phone
-        })
-        .select("*")
-        .single();
-
-      if (result.error) throw result.error;
-      user = result.data;
+    if (!user || !user.password_hash) {
+      return errorMessage(res, 401, "Numéro ou mot de passe incorrect");
     }
 
-    const token = createToken(user);
+    const passwordMatches = await bcrypt.compare(
+      password,
+      user.password_hash
+    );
+
+    if (!passwordMatches) {
+      return errorMessage(res, 401, "Numéro ou mot de passe incorrect");
+    }
 
     res.json({
-      token,
+      token: createToken(user),
       user: publicUser(user)
     });
 
   } catch (error) {
-    console.error("REGISTER:", error.message);
-    errorMessage(res, 500, "Impossible de créer le compte");
+    console.error("LOGIN:", error.message);
+    errorMessage(res, 500, "Impossible de se connecter");
+  }
+});
+
+// AJOUTER UN MOT DE PASSE À UN ANCIEN COMPTE
+// Cette route exige une ancienne session valide.
+app.post("/api/auth/set-password", authenticate, async (req, res) => {
+  try {
+    const password = req.body.password;
+    const confirmPassword = req.body.confirmPassword;
+
+    if (!validPassword(password)) {
+      return errorMessage(
+        res,
+        400,
+        "Le mot de passe doit contenir au moins 10 caractères"
+      );
+    }
+
+    if (password !== confirmPassword) {
+      return errorMessage(res, 400, "Les mots de passe ne correspondent pas");
+    }
+
+    const user = await getUser(req.userId);
+
+    if (!user) {
+      return errorMessage(res, 404, "Compte introuvable");
+    }
+
+    if (user.password_hash) {
+      return errorMessage(res, 409, "Un mot de passe existe déjà");
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const { data, error } = await supabase
+      .from("taya_v12_users")
+      .update({ password_hash: passwordHash })
+      .eq("id", req.userId)
+      .is("password_hash", null)
+      .select("id")
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!data) {
+      return errorMessage(
+        res,
+        409,
+        "Le mot de passe a déjà été configuré"
+      );
+    }
+
+    res.json({
+      success: true,
+      message: "Mot de passe configuré avec succès"
+    });
+
+  } catch (error) {
+    console.error("SET PASSWORD:", error.message);
+    errorMessage(res, 500, "Impossible de configurer le mot de passe");
+  }
+});
+
+// CHANGER LE MOT DE PASSE
+app.post("/api/auth/change-password", authenticate, async (req, res) => {
+  try {
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+
+    const user = await getUser(req.userId);
+
+    if (!user || !user.password_hash) {
+      return errorMessage(res, 400, "Compte non configuré");
+    }
+
+    const matches = await bcrypt.compare(
+      currentPassword || "",
+      user.password_hash
+    );
+
+    if (!matches) {
+      return errorMessage(res, 401, "Mot de passe actuel incorrect");
+    }
+
+    if (!validPassword(newPassword)) {
+      return errorMessage(
+        res,
+        400,
+        "Le nouveau mot de passe doit contenir au moins 10 caractères"
+      );
+    }
+
+    if (newPassword !== confirmPassword) {
+      return errorMessage(res, 400, "Les mots de passe ne correspondent pas");
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+
+    const { error } = await supabase
+      .from("taya_v12_users")
+      .update({ password_hash: passwordHash })
+      .eq("id", req.userId);
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      message: "Mot de passe modifié"
+    });
+
+  } catch (error) {
+    console.error("CHANGE PASSWORD:", error.message);
+    errorMessage(res, 500, "Impossible de modifier le mot de passe");
   }
 });
 
@@ -231,17 +449,20 @@ app.put("/api/profile/name", authenticate, async (req, res) => {
       return errorMessage(res, 404, "Utilisateur introuvable");
     }
 
+    const cleanName = String(newName || "").trim();
+
     if (
       currentName !== user.full_name ||
-      !newName ||
-      newName !== confirmName
+      cleanName.length < 2 ||
+      cleanName.length > 80 ||
+      cleanName !== String(confirmName || "").trim()
     ) {
       return errorMessage(res, 400, "Vérification du nom incorrecte");
     }
 
     const { data, error } = await supabase
       .from("taya_v12_users")
-      .update({ full_name: String(newName).trim() })
+      .update({ full_name: cleanName })
       .eq("id", req.userId)
       .select("*")
       .single();
@@ -288,6 +509,7 @@ app.put("/api/profile/phone", authenticate, async (req, res) => {
       if (error.code === "23505") {
         return errorMessage(res, 409, "Ce numéro est déjà utilisé");
       }
+
       throw error;
     }
 
@@ -401,11 +623,10 @@ app.post("/api/chat", authenticate, async (req, res) => {
     const systemPrompt = `
 Tu es TAYA IA V12, un assistant intelligent créé par Maruce en Guinée.
 
-Tu dois répondre avec intelligence, rapidité et précision.
+Tu réponds avec intelligence, rapidité et précision.
 
 RÈGLES :
 - Réponds dans la langue de l'utilisateur.
-- Comprends les questions simples et complexes.
 - Donne des réponses exactes, utiles et naturelles.
 - Explique clairement lorsque c'est nécessaire.
 - Aide pour les études, les sciences, les mathématiques,
@@ -435,7 +656,11 @@ ${memory || "Aucune information personnelle enregistrée."}
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 110000);
+
+    const timeout = setTimeout(
+      () => controller.abort(),
+      110000
+    );
 
     let response;
 
@@ -469,8 +694,12 @@ ${memory || "Aucune information personnelle enregistrée."}
     const result = await response.json();
 
     if (!response.ok) {
-      console.error("OPENROUTER:", result);
-      return errorMessage(res, 502, "Le service IA est momentanément indisponible");
+      console.error("OPENROUTER:", response.status);
+      return errorMessage(
+        res,
+        502,
+        "Le service IA est momentanément indisponible"
+      );
     }
 
     const answer = result.choices?.[0]?.message?.content;
@@ -479,25 +708,36 @@ ${memory || "Aucune information personnelle enregistrée."}
       return errorMessage(res, 502, "Aucune réponse reçue de l'IA");
     }
 
-    // Enregistrement de la conversation
+    const lastUserMessage = [...cleanMessages]
+      .reverse()
+      .find(m => m.role === "user");
+
     const rows = [];
 
-    const lastUserMessage = cleanMessages[cleanMessages.length - 1];
+    if (lastUserMessage) {
+      let messageText = "";
 
-    if (lastUserMessage.role === "user") {
+      if (typeof lastUserMessage.content === "string") {
+        messageText = lastUserMessage.content;
+      } else if (Array.isArray(lastUserMessage.content)) {
+        messageText = lastUserMessage.content
+          .filter(part => part && part.type === "text")
+          .map(part => part.text || "")
+          .join("\n");
+      }
+
       rows.push({
         user_id: req.userId,
         role: "user",
-        message: typeof lastUserMessage.content === "string"
-          ? lastUserMessage.content
-          : JSON.stringify(lastUserMessage.content)
+        message: messageText.slice(0, 20000) ||
+          "[Message multimodal]"
       });
     }
 
     rows.push({
       user_id: req.userId,
       role: "assistant",
-      message: answer
+      message: String(answer).slice(0, 20000)
     });
 
     const { error: saveError } = await supabase
@@ -555,7 +795,7 @@ app.post("/api/contact", authenticate, async (req, res) => {
 });
 
 // TABLEAU DE BORD ADMINISTRATEUR
-app.get("/api/admin/dashboard", async (req, res) => {
+app.get("/api/admin/dashboard", adminLimiter, async (req, res) => {
   try {
     checkConfiguration();
 
@@ -569,7 +809,6 @@ app.get("/api/admin/dashboard", async (req, res) => {
     const [
       usersResult,
       messagesResult,
-      contactsResult,
       userCount,
       messageCount
     ] = await Promise.all([
@@ -584,10 +823,6 @@ app.get("/api/admin/dashboard", async (req, res) => {
         .select("message,user_id,created_at")
         .order("created_at", { ascending: false })
         .limit(100),
-
-      supabase
-        .from("taya_v12_contacts")
-        .select("*", { count: "exact", head: true }),
 
       supabase
         .from("taya_v12_users")
@@ -620,6 +855,17 @@ app.get("/api/admin/dashboard", async (req, res) => {
 app.use((req, res) => {
   res.status(404).json({
     error: "Route introuvable"
+  });
+});
+
+// ERREURS GÉNÉRALES
+app.use((error, req, res, next) => {
+  console.error("SERVER ERROR:", error.message);
+
+  if (res.headersSent) return next(error);
+
+  res.status(500).json({
+    error: "Une erreur interne est survenue"
   });
 });
 

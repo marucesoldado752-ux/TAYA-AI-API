@@ -11,6 +11,9 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
+// CORRECTION POUR RENDER
+app.set("trust proxy", 1);
+
 const PORT = process.env.PORT || 3000;
 const VERSION = "13.0.0";
 
@@ -110,6 +113,7 @@ async function verifyPassword(password, stored) {
 
 function authenticate(req, res, next) {
   const header = req.headers.authorization || "";
+
   const token = header.startsWith("Bearer ")
     ? header.slice(7)
     : "";
@@ -149,6 +153,7 @@ function requireSupabase(res) {
       success: false,
       error: "Supabase non configuré"
     });
+
     return false;
   }
 
@@ -260,10 +265,9 @@ app.post("/api/auth/register", async (req, res) => {
       hint: error.hint
     });
 
-    // Diagnostic temporaire pour identifier l'erreur
     res.status(500).json({
       success: false,
-      error: error.message || "Erreur inconnue lors de l'inscription"
+      error: "Impossible de créer le compte"
     });
   }
 });
@@ -312,12 +316,7 @@ app.post("/api/auth/login", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("LOGIN ERROR:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint
-    });
+    console.error("LOGIN ERROR:", error.message);
 
     res.status(500).json({
       success: false,
@@ -400,15 +399,18 @@ app.post("/api/chat", async (req, res) => {
       "https://openrouter.ai/api/v1/chat/completions",
       {
         method: "POST",
+
         headers: {
           "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
           "Content-Type": "application/json",
           "HTTP-Referer": "https://marucesoldado752-ux.github.io",
           "X-Title": "TAYA IA V13"
         },
+
         body: JSON.stringify({
           model: OPENROUTER_MODEL ||
             "meta-llama/llama-3.3-70b-instruct:free",
+
           messages: [
             {
               role: "system",
@@ -416,9 +418,11 @@ app.post("/api/chat", async (req, res) => {
             },
             ...cleanMessages
           ],
+
           temperature: 0.7,
           max_tokens: 2500
         }),
+
         signal: AbortSignal.timeout(60000)
       }
     );
@@ -500,9 +504,9 @@ app.use((req, res) => {
   });
 });
 
-// ERREUR SERVEUR
+// ERREURS SERVEUR
 app.use((error, req, res, next) => {
-  console.error("SERVER ERROR:", error.message);
+  console.error("SERVER ERROR:", error);
 
   res.status(500).json({
     success: false,
@@ -510,7 +514,8 @@ app.use((error, req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
+// DÉMARRAGE
+app.listen(PORT, "0.0.0.0", () => {
   console.log("================================");
   console.log("TAYA IA V13");
   console.log("Serveur démarré sur le port " + PORT);

@@ -1,456 +1,487 @@
-require('dotenv').config();
+require("dotenv").config();
 
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const { createClient } = require('@supabase/supabase-js');
+const express = require("express");
+const cors = require("cors");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const { promisify } = require("util");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-const PORT = process.env.PORT || 10000;
-const APP_URL = process.env.APP_URL || 'https://taya-ai-api.onrender.com';
+const PORT = process.env.PORT || 3000;
+const VERSION = "13.0.0";
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const TAYA_ADMIN_KEY = process.env.TAYA_ADMIN_KEY;
+const {
+  OPENROUTER_API_KEY,
+  OPENROUTER_MODEL,
+  SUPABASE_URL,
+  SUPABASE_SECRET_KEY,
+  JWT_SECRET,
+  ALLOWED_ORIGIN
+} = process.env;
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
+const scrypt = promisify(crypto.scrypt);
 
-const SUPABASE_KEY =
-  process.env.SUPABASE_SECRET_KEY ||
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_KEY ||
-  process.env.SUPABASE_ANON_KEY;
+const supabase =
+  SUPABASE_URL && SUPABASE_SECRET_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false
+        }
+      })
+    : null;
 
-const AI_MODEL =
-  process.env.OPENROUTER_MODEL ||
-  'meta-llama/llama-3.1-8b-instruct:free';
+const ADMIN_PHONES = [
+  "+224663401157",
+  "+224612768878"
+];
 
-// ======================================
-// CONFIGURATION
-// ======================================
-
-app.use(helmet({
-  crossOriginResourcePolicy: false
-}));
+app.use(helmet());
 
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGIN
-    ? process.env.ALLOWED_ORIGIN.split(',')
+  origin: ALLOWED_ORIGIN
+    ? ALLOWED_ORIGIN.split(",").map(x => x.trim())
     : true
 }));
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: "2mb" }));
 
-app.use('/api/', rateLimit({
-  windowMs: 60 * 1000,
-  limit: 60,
-  standardHeaders: 'draft-7',
+app.use("/api/", rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 100,
+  standardHeaders: true,
   legacyHeaders: false
 }));
 
-// ======================================
-// SUPABASE
-// ======================================
-
-let supabase = null;
-
-if (SUPABASE_URL && SUPABASE_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-  console.log('✅ Supabase configuré');
-} else {
-  console.error('❌ Configuration Supabase manquante');
-}
-
-// ======================================
-// ADMINISTRATEURS AUTORISÉS
-// ======================================
-
 function normalizePhone(phone) {
-  return String(phone || '').replace(/\D/g, '');
+  const digits = String(phone || "").replace(/\D/g, "");
+  return digits ? "+" + digits : "";
 }
 
-const ADMIN_PHONES = [
-  '224663401157',
-  '224612768878'
-];
+function isAdmin(phone) {
+  return ADMIN_PHONES.includes(normalizePhone(phone));
+}
 
-async function isAuthorizedAdmin(phone) {
-  const normalized = normalizePhone(phone);
-
-  if (ADMIN_PHONES.includes(normalized)) {
-    return true;
+function createToken(user) {
+  if (!JWT_SECRET) {
+    throw new Error("JWT_SECRET non configuré");
   }
 
-  if (!supabase) return false;
+  return jwt.sign(
+    {
+      id: user.id,
+      phone: user.phone,
+      role: isAdmin(user.phone) ? "admin" : "user"
+    },
+    JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+}
 
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = await scrypt(password, salt, 64);
+
+  return `scrypt$${salt}$${hash.toString("hex")}`;
+}
+
+async function verifyPassword(password, stored) {
   try {
-    const { data, error } = await supabase
-      .from('admin_whitelist')
-      .select('phone, numero');
+    const parts = String(stored).split("$");
 
-    if (error) {
-      console.error('Erreur whitelist:', error.message);
+    if (parts.length !== 3 || parts[0] !== "scrypt") {
       return false;
     }
 
-    return (data || []).some(row =>
-      normalizePhone(row.phone) === normalized ||
-      normalizePhone(row.numero) === normalized
-    );
+    const salt = parts[1];
+    const original = Buffer.from(parts[2], "hex");
+    const hash = await scrypt(password, salt, 64);
 
-  } catch (error) {
-    console.error('Whitelist:', error.message);
+    return original.length === hash.length &&
+      crypto.timingSafeEqual(original, hash);
+  } catch {
     return false;
   }
 }
 
-// ======================================
-// SYSTEM PROMPT TAYA IA
-// ======================================
+function authenticate(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ")
+    ? header.slice(7)
+    : "";
+
+  if (!token || !JWT_SECRET) {
+    return res.status(401).json({
+      success: false,
+      error: "Connexion nécessaire"
+    });
+  }
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({
+      success: false,
+      error: "Session expirée"
+    });
+  }
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== "admin") {
+    return res.status(403).json({
+      success: false,
+      error: "Accès administrateur refusé"
+    });
+  }
+
+  next();
+}
+
+function requireSupabase(res) {
+  if (!supabase) {
+    res.status(503).json({
+      success: false,
+      error: "Supabase non configuré"
+    });
+    return false;
+  }
+
+  return true;
+}
 
 const systemPrompt = `
-Tu es TAYA IA V13, une intelligence artificielle développée par
-Maruce Soldado, en Guinée.
+Tu es TAYA IA V13, une intelligence artificielle créée par Maruce Soldado en Guinée 🇬🇳.
 
-TES RÈGLES :
-
-1. Réponds directement à la question.
-2. Utilise un français naturel, clair et correct.
-3. Évite les longues introductions inutiles.
-4. Ne répète pas la question de l'utilisateur.
-5. Explique les sujets difficiles simplement.
-6. Aide en programmation, mathématiques, sciences,
-   technologie, rédaction et traduction.
-7. Aide à analyser les problèmes et à trouver des solutions.
-8. Si tu ne connais pas une réponse, sois honnête.
-9. N'invente jamais des informations.
-10. Adapte la longueur de la réponse à la demande.
-11. Respecte le contexte des conversations précédentes.
-12. Tu es TAYA IA, pas ChatGPT.
-
-Ton objectif est de fournir des réponses utiles,
-précises et rapides.
+RÈGLES :
+- Réponds directement à la question.
+- Utilise un français naturel et clair.
+- Évite les introductions inutiles.
+- Ne répète pas la question.
+- Aide en programmation, mathématiques, sciences, technologie, rédaction et traduction.
+- Donne du code complet et fonctionnel lorsque cela est demandé.
+- Explique les sujets difficiles simplement.
+- Ne prétends jamais avoir effectué une action que tu n'as pas faite.
+- Si tu ne connais pas une réponse, sois honnête.
+- Garde le contexte de la conversation.
 `;
 
-// ======================================
-// PAGE PRINCIPALE
-// ======================================
-
-app.get('/', (req, res) => {
+app.get("/", (req, res) => {
   res.json({
     success: true,
-    name: 'TAYA IA',
-    version: '13.0.0',
-    status: 'online',
+    name: "TAYA IA",
+    version: VERSION,
+    status: "online",
     supabase: !!supabase,
     artificial_intelligence: !!OPENROUTER_API_KEY
   });
 });
 
-// ======================================
-// VÉRIFICATION DU SERVEUR
-// ======================================
-
-app.get('/health', (req, res) => {
+app.get("/health", (req, res) => {
   res.json({
     success: true,
-    status: 'healthy',
-    version: '13.0.0',
-    timestamp: new Date().toISOString()
+    status: "healthy",
+    version: VERSION
   });
 });
 
-// ======================================
-// ACTIVATION ADMINISTRATEUR
-// ======================================
-
-app.post('/api/admin/activate', async (req, res) => {
+// INSCRIPTION
+app.post("/api/auth/register", async (req, res) => {
   try {
-    const body = req.body || {};
+    if (!requireSupabase(res)) return;
 
-    const adminKey =
-      body.adminKey ||
-      body.cleAdmin ||
-      body.cle_administrateur ||
-      body.key;
+    const fullName = String(
+      req.body.fullName || req.body.full_name || ""
+    ).trim();
 
-    const fullName =
-      body.fullName ||
-      body.nomComplet ||
-      body.name ||
-      body.nom;
+    const phone = normalizePhone(req.body.phone);
+    const password = String(req.body.password || "");
 
-    const phone =
-      body.phone ||
-      body.numeroAutorise ||
-      body.numero ||
-      body.numero_autorise;
-
-    const password =
-      body.password ||
-      body.nouveauMotDePasse ||
-      body.motDePasse ||
-      body.nouveau_mot_de_passe;
-
-    if (!adminKey || !fullName || !phone || !password) {
+    if (!fullName || !phone || password.length < 8) {
       return res.status(400).json({
         success: false,
-        error: 'Tous les champs sont obligatoires'
+        error: "Nom, numéro et mot de passe de 8 caractères minimum requis"
       });
     }
 
-    if (!TAYA_ADMIN_KEY) {
-      return res.status(500).json({
+    const { data: existing, error: lookupError } =
+      await supabase
+        .from("taya_v13_users")
+        .select("id")
+        .eq("phone", phone)
+        .maybeSingle();
+
+    if (lookupError) throw lookupError;
+
+    if (existing) {
+      return res.status(409).json({
         success: false,
-        error: 'TAYA_ADMIN_KEY manquant sur Render'
+        error: "Ce numéro possède déjà un compte"
       });
     }
 
-    if (adminKey !== TAYA_ADMIN_KEY) {
-      return res.status(403).json({
-        success: false,
-        error: 'Clé administrateur incorrecte'
-      });
-    }
+    const passwordHash = await hashPassword(password);
 
-    if (!supabase) {
-      return res.status(503).json({
-        success: false,
-        error: 'Supabase non configuré'
-      });
-    }
+    const { data: user, error } = await supabase
+      .from("taya_v13_users")
+      .insert({
+        full_name: fullName,
+        phone,
+        password_hash: passwordHash
+      })
+      .select("id,full_name,phone,created_at")
+      .single();
 
-    const normalized = normalizePhone(phone);
+    if (error) throw error;
 
-    if (!await isAuthorizedAdmin(normalized)) {
-      return res.status(403).json({
-        success: false,
-        error: 'Ce numéro n’est pas autorisé'
-      });
-    }
+    const token = createToken(user);
 
-    // La table admins actuelle contient uniquement phone et created_at.
-    // On ne tente donc pas d'y enregistrer des colonnes inexistantes.
-
-    const { data: existing, error: searchError } = await supabase
-      .from('admins')
-      .select('phone')
-      .eq('phone', normalized)
-      .maybeSingle();
-
-    if (searchError) throw searchError;
-
-    if (!existing) {
-      const { error: insertError } = await supabase
-        .from('admins')
-        .insert({
-          phone: normalized,
-          created_at: new Date().toISOString()
-        });
-
-      if (insertError) throw insertError;
-    }
-
-    return res.json({
+    res.status(201).json({
       success: true,
-      message: 'Numéro administrateur autorisé',
-      admin: {
-        phone: normalized,
-        fullName
-      },
-      note: 'La configuration du mot de passe administrateur doit être gérée par un système d’authentification sécurisé.'
+      token,
+      user: {
+        id: user.id,
+        fullName: user.full_name,
+        phone: user.phone,
+        role: isAdmin(user.phone) ? "admin" : "user"
+      }
     });
 
   } catch (error) {
-    console.error('ADMIN ERROR:', error.message);
+    console.error("REGISTER ERROR:", error.message);
 
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
-      error: 'Erreur lors de l’activation administrateur'
+      error: "Impossible de créer le compte"
     });
   }
 });
 
-// Routes compatibles avec les anciennes versions.
+// CONNEXION
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    if (!requireSupabase(res)) return;
 
-app.post('/api/activate-admin', (req, res, next) => {
-  req.url = '/api/admin/activate';
-  next();
+    const phone = normalizePhone(req.body.phone);
+    const password = String(req.body.password || "");
+
+    if (!phone || !password) {
+      return res.status(400).json({
+        success: false,
+        error: "Numéro et mot de passe requis"
+      });
+    }
+
+    const { data: user, error } = await supabase
+      .from("taya_v13_users")
+      .select("*")
+      .eq("phone", phone)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!user || !(await verifyPassword(password, user.password_hash))) {
+      return res.status(401).json({
+        success: false,
+        error: "Numéro ou mot de passe incorrect"
+      });
+    }
+
+    const token = createToken(user);
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user.id,
+        fullName: user.full_name,
+        phone: user.phone,
+        role: isAdmin(user.phone) ? "admin" : "user"
+      }
+    });
+
+  } catch (error) {
+    console.error("LOGIN ERROR:", error.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Erreur de connexion"
+    });
+  }
 });
 
-app.post('/api/admin/activation', (req, res, next) => {
-  req.url = '/api/admin/activate';
-  next();
+// PROFIL
+app.get("/api/auth/me", authenticate, async (req, res) => {
+  try {
+    if (!requireSupabase(res)) return;
+
+    const { data: user, error } = await supabase
+      .from("taya_v13_users")
+      .select("id,full_name,phone,created_at")
+      .eq("id", req.user.id)
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({
+        success: false,
+        error: "Utilisateur introuvable"
+      });
+    }
+
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        fullName: user.full_name,
+        phone: user.phone,
+        role: isAdmin(user.phone) ? "admin" : "user"
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: "Erreur de profil"
+    });
+  }
 });
 
-// ======================================
 // INTELLIGENCE ARTIFICIELLE
-// ======================================
-
-app.post('/api/chat', async (req, res) => {
+app.post("/api/chat", async (req, res) => {
   try {
     if (!OPENROUTER_API_KEY) {
       return res.status(503).json({
         success: false,
-        error: 'OPENROUTER_API_KEY manquant sur Render'
+        error: "Clé OpenRouter non configurée"
       });
     }
 
-    const body = req.body || {};
+    const messages = Array.isArray(req.body.messages)
+      ? req.body.messages
+      : [];
 
-    let messages = body.messages;
-
-    if (!Array.isArray(messages) && body.message) {
-      messages = [
-        {
-          role: 'user',
-          content: body.message
-        }
-      ];
-    }
-
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Message manquant'
-      });
-    }
-
-    const validMessages = messages
-      .filter(item =>
-        item &&
-        ['user', 'assistant'].includes(item.role) &&
-        typeof item.content === 'string' &&
-        item.content.trim().length > 0
+    const cleanMessages = messages
+      .filter(m =>
+        ["user", "assistant"].includes(m.role) &&
+        typeof m.content === "string"
       )
-      .slice(-12)
-      .map(item => ({
-        role: item.role,
-        content: item.content.slice(0, 12000)
+      .slice(-20)
+      .map(m => ({
+        role: m.role,
+        content: m.content.slice(0, 12000)
       }));
 
-    if (!validMessages.length) {
+    if (!cleanMessages.length) {
       return res.status(400).json({
         success: false,
-        error: 'Aucun message valide'
+        error: "Aucun message reçu"
       });
     }
 
-    const controller = new AbortController();
+    const response = await fetch(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://marucesoldado752-ux.github.io",
+          "X-Title": "TAYA IA V13"
+        },
+        body: JSON.stringify({
+          model: OPENROUTER_MODEL ||
+            "meta-llama/llama-3.3-70b-instruct:free",
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt
+            },
+            ...cleanMessages
+          ],
+          temperature: 0.7,
+          max_tokens: 2500
+        }),
+        signal: AbortSignal.timeout(60000)
+      }
+    );
 
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, 45000);
-
-    let response;
-
-    try {
-      response = await fetch(
-        'https://openrouter.ai/api/v1/chat/completions',
-        {
-          method: 'POST',
-
-          headers: {
-            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': APP_URL,
-            'X-Title': 'TAYA IA V13'
-          },
-
-          body: JSON.stringify({
-            model: AI_MODEL,
-
-            messages: [
-              {
-                role: 'system',
-                content: systemPrompt
-              },
-              ...validMessages
-            ],
-
-            temperature: 0.7,
-            max_tokens: 1500
-          }),
-
-          signal: controller.signal
-        }
-      );
-
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    const result = await response.json();
+    const data = await response.json();
 
     if (!response.ok) {
-      console.error('OPENROUTER ERROR:', result);
+      console.error("OPENROUTER ERROR:", data);
 
       return res.status(502).json({
         success: false,
-        error: 'Le service IA est temporairement indisponible',
-        details: result?.error?.message || 'Erreur OpenRouter'
+        error: "Le moteur IA n'a pas répondu correctement"
       });
     }
 
-    const answer = result.choices?.[0]?.message?.content;
+    const answer = data.choices?.[0]?.message?.content;
 
     if (!answer) {
       return res.status(502).json({
         success: false,
-        error: 'Réponse IA vide'
+        error: "Réponse IA vide"
       });
     }
 
-    return res.json({
+    res.json({
       success: true,
       reply: answer,
-      answer: answer,
-      response: answer
+      answer
     });
 
   } catch (error) {
-    console.error('CHAT ERROR:', error.message);
+    console.error("CHAT ERROR:", error.message);
 
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
-      error: error.name === 'AbortError'
-        ? 'Le délai de réponse IA est dépassé'
-        : 'Erreur pendant la génération de la réponse'
+      error: "Erreur du moteur IA"
     });
   }
 });
 
-// Ancienne route compatible.
+// ADMIN : LISTE DES UTILISATEURS
+app.get(
+  "/api/admin/users",
+  authenticate,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      if (!requireSupabase(res)) return;
 
-app.post('/chat', (req, res, next) => {
-  req.url = '/api/chat';
-  next();
-});
+      const { data, error } = await supabase
+        .from("taya_v13_users")
+        .select("id,full_name,phone,created_at")
+        .order("created_at", { ascending: false })
+        .limit(500);
 
-// ======================================
-// ERREURS
-// ======================================
+      if (error) throw error;
 
-app.use((err, req, res, next) => {
-  console.error('SERVER ERROR:', err.message);
+      res.json({
+        success: true,
+        users: data
+      });
 
-  res.status(500).json({
-    success: false,
-    error: 'Erreur interne du serveur'
-  });
-});
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: "Impossible de charger les utilisateurs"
+      });
+    }
+  }
+);
 
-// ======================================
-// DÉMARRAGE DU SERVEUR
-// ======================================
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('================================');
-  console.log('🚀 TAYA IA V13 EST EN LIGNE');
-  console.log('✅ Serveur démarré');
-  console.log('✅ Supabase :', !!supabase);
-  console.log('🤖 Intelligence artificielle :', !!OPENROUTER_API_KEY);
-  console.log('================================');
+app.listen(PORT, () => {
+  console.log("================================");
+  console.log("TAYA IA V13");
+  console.log("Serveur démarré sur le port " + PORT);
+  console.log("Supabase :", !!supabase);
+  console.log("OpenRouter :", !!OPENROUTER_API_KEY);
+  console.log("================================");
 });

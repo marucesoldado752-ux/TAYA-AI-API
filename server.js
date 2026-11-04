@@ -253,11 +253,17 @@ app.post("/api/auth/register", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("REGISTER ERROR:", error.message);
+    console.error("REGISTER ERROR:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint
+    });
 
+    // Diagnostic temporaire pour identifier l'erreur
     res.status(500).json({
       success: false,
-      error: "Impossible de créer le compte"
+      error: error.message || "Erreur inconnue lors de l'inscription"
     });
   }
 });
@@ -306,7 +312,12 @@ app.post("/api/auth/login", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("LOGIN ERROR:", error.message);
+    console.error("LOGIN ERROR:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint
+    });
 
     res.status(500).json({
       success: false,
@@ -344,6 +355,8 @@ app.get("/api/auth/me", authenticate, async (req, res) => {
     });
 
   } catch (error) {
+    console.error("PROFILE ERROR:", error.message);
+
     res.status(500).json({
       success: false,
       error: "Erreur de profil"
@@ -469,6 +482,8 @@ app.get(
       });
 
     } catch (error) {
+      console.error("ADMIN USERS ERROR:", error.message);
+
       res.status(500).json({
         success: false,
         error: "Impossible de charger les utilisateurs"
@@ -477,11 +492,30 @@ app.get(
   }
 );
 
+// ROUTE INCONNUE
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: "Route introuvable"
+  });
+});
+
+// ERREUR SERVEUR
+app.use((error, req, res, next) => {
+  console.error("SERVER ERROR:", error.message);
+
+  res.status(500).json({
+    success: false,
+    error: "Erreur interne du serveur"
+  });
+});
+
 app.listen(PORT, () => {
   console.log("================================");
   console.log("TAYA IA V13");
   console.log("Serveur démarré sur le port " + PORT);
   console.log("Supabase :", !!supabase);
   console.log("OpenRouter :", !!OPENROUTER_API_KEY);
+  console.log("JWT :", !!JWT_SECRET);
   console.log("================================");
 });

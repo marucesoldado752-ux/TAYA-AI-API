@@ -1,6 +1,6 @@
 {
   "name": "taya-ia",
-  "version": "17.0.0",
+  "version": "18.3.0",
   "description": "TAYA IA - Assistant intelligent by Maruce Soldado",
   "main": "server.js",
   "type": "commonjs",

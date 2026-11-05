@@ -12,11 +12,10 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-// CORRECTION RENDER : reconnaître le proxy
 app.set("trust proxy", 1);
 
 const PORT = process.env.PORT || 3000;
-const VERSION = "17.0.1";
+const VERSION = "18.0.0";
 
 const {
   SUPABASE_URL,
@@ -48,8 +47,14 @@ const ADMIN_PHONES = [
 
 const scryptAsync = promisify(crypto.scrypt);
 
+// --------------------------------------------------
+// CONFIGURATION
+// --------------------------------------------------
+
 app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" }
+  crossOriginResourcePolicy: {
+    policy: "cross-origin"
+  }
 }));
 
 const allowedOrigins = (ALLOWED_ORIGIN || "")
@@ -59,8 +64,11 @@ const allowedOrigins = (ALLOWED_ORIGIN || "")
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.length === 0 ||
-        allowedOrigins.includes(origin)) {
+    if (
+      !origin ||
+      allowedOrigins.length === 0 ||
+      allowedOrigins.includes(origin)
+    ) {
       return callback(null, true);
     }
 
@@ -71,7 +79,10 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: "12mb" }));
-app.use(express.urlencoded({ extended: true, limit: "12mb" }));
+app.use(express.urlencoded({
+  extended: true,
+  limit: "12mb"
+}));
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -81,6 +92,10 @@ const limiter = rateLimit({
 });
 
 app.use("/api", limiter);
+
+// --------------------------------------------------
+// OUTILS
+// --------------------------------------------------
 
 function normalizePhone(phone) {
   return String(phone || "").replace(/[\s()-]/g, "");
@@ -116,6 +131,7 @@ async function verifyPassword(password, stored) {
 
   if (stored.startsWith("scrypt:")) {
     const parts = stored.split(":");
+
     if (parts.length !== 3) return false;
 
     const derived = await scryptAsync(password, parts[1], 64);
@@ -125,29 +141,45 @@ async function verifyPassword(password, stored) {
       crypto.timingSafeEqual(expected, derived);
   }
 
-  // Compatibilité avec les anciens mots de passe bcrypt
   if (/^\$2[aby]\$/.test(stored)) {
     return bcrypt.compare(password, stored);
   }
 
-  // Compatibilité avec les anciens mots de passe en clair
   return password === stored;
 }
 
 function createToken(user) {
+  if (!JWT_SECRET) {
+    throw new Error("JWT_SECRET non configuré");
+  }
+
   return jwt.sign(
     {
       id: user.id,
       phone: user.phone
     },
     JWT_SECRET,
-    { expiresIn: "30d" }
+    {
+      expiresIn: "30d"
+    }
   );
 }
 
+// --------------------------------------------------
+// AUTHENTIFICATION
+// --------------------------------------------------
+
 async function authenticate(req, res, next) {
   try {
+    if (!supabase || !JWT_SECRET) {
+      return res.status(503).json({
+        success: false,
+        error: "Service momentanément indisponible"
+      });
+    }
+
     const header = req.headers.authorization || "";
+
     const token = header.startsWith("Bearer ")
       ? header.slice(7)
       : "";
@@ -176,6 +208,7 @@ async function authenticate(req, res, next) {
 
     req.user = user;
     next();
+
   } catch (error) {
     return res.status(401).json({
       success: false,
@@ -195,32 +228,46 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// --------------------------------------------------
+// NETTOYAGE DES MESSAGES
+// --------------------------------------------------
+
 function cleanMessages(messages) {
   if (!Array.isArray(messages)) return [];
 
   return messages
-    .filter(m =>
-      m &&
-      ["user", "assistant"].includes(m.role) &&
-      typeof m.content === "string"
+    .filter(message =>
+      message &&
+      ["user", "assistant"].includes(message.role) &&
+      typeof message.content === "string"
     )
     .slice(-20)
-    .map(m => ({
-      role: m.role,
-      content: m.content.slice(0, 12000)
+    .map(message => ({
+      role: message.role,
+      content: message.content.slice(0, 12000)
     }));
 }
 
+// --------------------------------------------------
+// MÉMOIRE
+// --------------------------------------------------
+
 async function getMemory(userId) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("taya_v12_memories")
     .select("memory")
     .eq("user_id", userId)
     .order("updated_at", { ascending: false })
     .limit(1);
 
+  if (error) throw error;
+
   return data?.[0]?.memory || "";
 }
+
+// --------------------------------------------------
+// SAUVEGARDE DES MESSAGES
+// --------------------------------------------------
 
 async function saveMessage(userId, role, message) {
   const { error } = await supabase
@@ -232,9 +279,16 @@ async function saveMessage(userId, role, message) {
     });
 
   if (error) {
-    console.error("Erreur sauvegarde message :", error.message);
+    console.error(
+      "Erreur sauvegarde message :",
+      error.message
+    );
   }
 }
+
+// --------------------------------------------------
+// INTELLIGENCE ARTIFICIELLE
+// --------------------------------------------------
 
 async function callAI(messages, memory = "") {
   if (!OPENROUTER_API_KEY) {
@@ -244,13 +298,19 @@ async function callAI(messages, memory = "") {
   const systemPrompt = `
 Tu es TAYA IA, un assistant intelligent créé par Maruce Soldado en Guinée.
 
-Réponds en français lorsque l'utilisateur écrit en français.
-Réponds directement à la question.
-Sois précis, utile et naturel.
-Évite les introductions inutiles.
-Aide pour les questions générales, les calculs, la traduction,
-la programmation, la rédaction et l'apprentissage.
-N'invente pas des informations que tu ne connais pas.
+Réponds dans la langue utilisée par l'utilisateur.
+
+RÈGLES :
+- Réponds directement à la question.
+- Sois précis, utile et naturel.
+- Évite les introductions inutiles.
+- Ne répète pas inutilement la question.
+- Aide pour les questions générales.
+- Aide pour les calculs et les traductions.
+- Aide pour la programmation et la rédaction.
+- Explique clairement les sujets difficiles.
+- Respecte le contexte de la conversation.
+- N'invente jamais des informations que tu ne connais pas.
 
 Mémoire utile de l'utilisateur :
 ${memory || "Aucune mémoire enregistrée."}
@@ -269,7 +329,10 @@ ${memory || "Aucune mémoire enregistrée."}
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
         messages: [
-          { role: "system", content: systemPrompt },
+          {
+            role: "system",
+            content: systemPrompt
+          },
           ...messages
         ],
         temperature: 0.7,
@@ -282,6 +345,7 @@ ${memory || "Aucune mémoire enregistrée."}
 
   if (!response.ok) {
     console.error("OpenRouter :", data);
+
     throw new Error(
       data?.error?.message || "Erreur du service IA"
     );
@@ -312,7 +376,7 @@ app.get("/", (req, res) => {
 app.get("/api/status", (req, res) => {
   res.json({
     success: true,
-    version: "17.0.1",
+    version: VERSION,
     server: "online",
     supabase: supabase ? "configured" : "not_configured",
     ai: OPENROUTER_API_KEY ? "configured" : "not_configured"
@@ -320,7 +384,104 @@ app.get("/api/status", (req, res) => {
 });
 
 // --------------------------------------------------
-// INSCRIPTION
+// ACCÈS DIRECT V18
+// NOM + NUMÉRO SANS MOT DE PASSE
+// --------------------------------------------------
+
+app.post("/api/auth/access", async (req, res) => {
+  try {
+    if (!supabase || !JWT_SECRET) {
+      return res.status(503).json({
+        success: false,
+        error: "Service momentanément indisponible"
+      });
+    }
+
+    const name = String(req.body.name || "").trim();
+    const phone = normalizePhone(req.body.phone);
+
+    if (!name || name.length < 2 || name.length > 80) {
+      return res.status(400).json({
+        success: false,
+        error: "Entre un nom valide."
+      });
+    }
+
+    if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
+      return res.status(400).json({
+        success: false,
+        error: "Utilise ton numéro avec son indicatif, par exemple +224XXXXXXXXX."
+      });
+    }
+
+    // RECHERCHE DU COMPTE EXISTANT
+    const { data: existing, error: searchError } = await supabase
+      .from("taya_v13_users")
+      .select("*")
+      .eq("phone", phone)
+      .maybeSingle();
+
+    if (searchError) throw searchError;
+
+    let user = existing;
+
+    // SI LE COMPTE N'EXISTE PAS, CRÉER UN NOUVEAU COMPTE
+    if (!user) {
+      const { data: created, error: createError } = await supabase
+        .from("taya_v13_users")
+        .insert({
+          name,
+          phone,
+          role: isAdmin(phone) ? "admin" : "user",
+          must_reset_password: false,
+          updated_at: new Date().toISOString()
+        })
+        .select("*")
+        .single();
+
+      if (createError) {
+        // Protection contre deux créations simultanées
+        if (createError.code === "23505") {
+          const { data: found, error: retryError } = await supabase
+            .from("taya_v13_users")
+            .select("*")
+            .eq("phone", phone)
+            .single();
+
+          if (retryError) throw retryError;
+
+          user = found;
+        } else {
+          throw createError;
+        }
+      } else {
+        user = created;
+      }
+    }
+
+    return res.json({
+      success: true,
+      token: createToken(user),
+      user: publicUser(user),
+      existing: Boolean(existing),
+      message: existing
+        ? "Bienvenue sur TAYA IA."
+        : "Ton compte TAYA IA a été créé."
+    });
+
+  } catch (error) {
+    console.error("Accès direct :", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Impossible d'ouvrir TAYA IA."
+    });
+  }
+});
+
+// --------------------------------------------------
+// ANCIENNE INSCRIPTION
+// CONSERVÉE POUR COMPATIBILITÉ
 // --------------------------------------------------
 
 app.post("/api/auth/register", async (req, res) => {
@@ -335,7 +496,7 @@ app.post("/api/auth/register", async (req, res) => {
     if (!name || !phone || password.length < 6) {
       return res.status(400).json({
         success: false,
-        error: "Nom, téléphone et mot de passe de 6 caractères minimum requis"
+        error: "Informations invalides"
       });
     }
 
@@ -354,6 +515,7 @@ app.post("/api/auth/register", async (req, res) => {
 
     const passwordHash = await hashPassword(password);
     const recoveryCode = generateRecoveryCode();
+
     const recoveryHash = crypto
       .createHash("sha256")
       .update(recoveryCode)
@@ -375,7 +537,7 @@ app.post("/api/auth/register", async (req, res) => {
 
     if (error) throw error;
 
-    return res.status(201).json({
+    res.status(201).json({
       success: true,
       token: createToken(user),
       user: publicUser(user),
@@ -393,7 +555,8 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 // --------------------------------------------------
-// CONNEXION
+// ANCIENNE CONNEXION
+// CONSERVÉE POUR COMPATIBILITÉ
 // --------------------------------------------------
 
 app.post("/api/auth/login", async (req, res) => {
@@ -422,7 +585,11 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     const storedPassword = user.password_hash || user.password;
-    const valid = await verifyPassword(password, storedPassword);
+
+    const valid = await verifyPassword(
+      password,
+      storedPassword
+    );
 
     if (!valid) {
       return res.status(401).json({
@@ -431,8 +598,10 @@ app.post("/api/auth/login", async (req, res) => {
       });
     }
 
-    // Met à jour les anciens mots de passe après connexion
-    if (storedPassword && !storedPassword.startsWith("scrypt:")) {
+    if (
+      storedPassword &&
+      !storedPassword.startsWith("scrypt:")
+    ) {
       const newHash = await hashPassword(password);
 
       await supabase
@@ -461,15 +630,17 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 // --------------------------------------------------
-// RÉACTIVATION DES ANCIENS COMPTES
+// ANCIENNE RÉACTIVATION
 // --------------------------------------------------
 
 app.post("/api/auth/legacy-reset", async (req, res) => {
   try {
     const phone = normalizePhone(req.body.phone);
+
     const name = String(
       req.body.name || req.body.full_name || ""
     ).trim();
+
     const password = String(req.body.password || "");
 
     if (!phone || !name || password.length < 6) {
@@ -485,7 +656,11 @@ app.post("/api/auth/legacy-reset", async (req, res) => {
       .eq("phone", phone)
       .maybeSingle();
 
-    if (!user || user.name !== name || !user.must_reset_password) {
+    if (
+      !user ||
+      user.name !== name ||
+      !user.must_reset_password
+    ) {
       return res.status(400).json({
         success: false,
         error: "Informations de réactivation incorrectes"
@@ -493,6 +668,7 @@ app.post("/api/auth/legacy-reset", async (req, res) => {
     }
 
     const recoveryCode = generateRecoveryCode();
+
     const recoveryHash = crypto
       .createHash("sha256")
       .update(recoveryCode)
@@ -530,16 +706,20 @@ app.post("/api/auth/legacy-reset", async (req, res) => {
 });
 
 // --------------------------------------------------
-// RÉCUPÉRATION DU MOT DE PASSE
+// ANCIENNE RÉCUPÉRATION
 // --------------------------------------------------
 
 app.post("/api/auth/recover", async (req, res) => {
   try {
     const phone = normalizePhone(req.body.phone);
-    const recoveryCode = String(req.body.recoveryCode || "")
-      .trim()
-      .toUpperCase();
-    const newPassword = String(req.body.newPassword || "");
+
+    const recoveryCode = String(
+      req.body.recoveryCode || ""
+    ).trim().toUpperCase();
+
+    const newPassword = String(
+      req.body.newPassword || ""
+    );
 
     if (!phone || !recoveryCode || newPassword.length < 6) {
       return res.status(400).json({
@@ -559,8 +739,11 @@ app.post("/api/auth/recover", async (req, res) => {
       .update(recoveryCode)
       .digest("hex");
 
-    if (!user || !user.recovery_code_hash ||
-        user.recovery_code_hash !== recoveryHash) {
+    if (
+      !user ||
+      !user.recovery_code_hash ||
+      user.recovery_code_hash !== recoveryHash
+    ) {
       return res.status(400).json({
         success: false,
         error: "Code de récupération incorrect"
@@ -637,7 +820,7 @@ app.get("/api/history", authenticate, async (req, res) => {
 });
 
 // --------------------------------------------------
-// MÉMOIRE
+// MÉMOIRE : LECTURE
 // --------------------------------------------------
 
 app.get("/api/memory", authenticate, async (req, res) => {
@@ -650,6 +833,8 @@ app.get("/api/memory", authenticate, async (req, res) => {
     });
 
   } catch (error) {
+    console.error("Memory GET :", error);
+
     res.status(500).json({
       success: false,
       error: "Impossible de charger la mémoire"
@@ -657,15 +842,23 @@ app.get("/api/memory", authenticate, async (req, res) => {
   }
 });
 
+// --------------------------------------------------
+// MÉMOIRE : ENREGISTREMENT
+// --------------------------------------------------
+
 app.put("/api/memory", authenticate, async (req, res) => {
   try {
-    const memory = String(req.body.memory || "").slice(0, 10000);
+    const memory = String(
+      req.body.memory || ""
+    ).slice(0, 10000);
 
-    const { data: existing } = await supabase
+    const { data: existing, error: searchError } = await supabase
       .from("taya_v12_memories")
       .select("user_id")
       .eq("user_id", req.user.id)
       .limit(1);
+
+    if (searchError) throw searchError;
 
     let result;
 
@@ -695,7 +888,7 @@ app.put("/api/memory", authenticate, async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Memory :", error);
+    console.error("Memory PUT :", error);
 
     res.status(500).json({
       success: false,
@@ -730,7 +923,7 @@ app.post("/api/chat", authenticate, async (req, res) => {
 
     const lastUserMessage = [...messages]
       .reverse()
-      .find(m => m.role === "user");
+      .find(message => message.role === "user");
 
     if (!lastUserMessage) {
       return res.status(400).json({
@@ -740,6 +933,7 @@ app.post("/api/chat", authenticate, async (req, res) => {
     }
 
     const memory = await getMemory(req.user.id);
+
     const answer = await callAI(messages, memory);
 
     await saveMessage(
@@ -776,7 +970,9 @@ app.post("/api/chat", authenticate, async (req, res) => {
 
 app.post("/api/contact", authenticate, async (req, res) => {
   try {
-    const message = String(req.body.message || "").trim();
+    const message = String(
+      req.body.message || ""
+    ).trim();
 
     if (!message) {
       return res.status(400).json({
@@ -883,13 +1079,15 @@ app.get(
 );
 
 // --------------------------------------------------
-// ERREURS
+// GESTION DES ERREURS
 // --------------------------------------------------
 
 app.use((err, req, res, next) => {
   console.error("Erreur serveur :", err.message);
 
-  if (res.headersSent) return next(err);
+  if (res.headersSent) {
+    return next(err);
+  }
 
   res.status(500).json({
     success: false,

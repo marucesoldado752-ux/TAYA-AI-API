@@ -10,9 +10,9 @@ const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
+
 const PORT = process.env.PORT || 3000;
 const VERSION = "19.0.1";
-const OPENROUTER_URL = "https://openrouter.ai/api/v1";
 
 const {
   SUPABASE_URL,
@@ -26,6 +26,11 @@ const {
   TAVILY_API_KEY
 } = process.env;
 
+
+// ==========================================
+// CONFIGURATION SUPABASE
+// ==========================================
+
 const SUPABASE_KEY =
   SUPABASE_SECRET_KEY || SUPABASE_SERVICE_ROLE_KEY;
 
@@ -38,6 +43,11 @@ const supabase =
         }
       })
     : null;
+
+
+// ==========================================
+// CONFIGURATION EXPRESS
+// ==========================================
 
 const ALLOWED_ORIGINS = (
   process.env.ALLOWED_ORIGIN ||
@@ -83,6 +93,11 @@ app.use(
   })
 );
 
+
+// ==========================================
+// LIMITATION DES REQUÊTES
+// ==========================================
+
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 100,
@@ -98,10 +113,12 @@ const audioLimiter = rateLimit({
 });
 
 app.use("/api/", apiLimiter);
+app.use("/api/audio/", audioLimiter);
 
-/* =========================
-   OUTILS
-========================= */
+
+// ==========================================
+// FONCTIONS UTILITAIRES
+// ==========================================
 
 function success(res, data = {}) {
   return res.json({
@@ -154,6 +171,11 @@ function createToken(user) {
     }
   );
 }
+
+
+// ==========================================
+// SÉCURITÉ DES MOTS DE PASSE
+// ==========================================
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
@@ -218,9 +240,10 @@ function generateRecoveryCode() {
   return crypto.randomBytes(5).toString("hex").toUpperCase();
 }
 
-/* =========================
-   CONFIGURATION SERVICES
-========================= */
+
+// ==========================================
+// CONFIGURATION DES SERVICES
+// ==========================================
 
 function requireServices(req, res, next) {
   if (!supabase) {
@@ -250,9 +273,10 @@ app.use("/api/", (req, res, next) => {
   return requireServices(req, res, next);
 });
 
-/* =========================
-   AUTHENTIFICATION
-========================= */
+
+// ==========================================
+// AUTHENTIFICATION JWT
+// ==========================================
 
 async function authenticate(req, res, next) {
   try {
@@ -281,6 +305,7 @@ async function authenticate(req, res, next) {
     req.user = user;
 
     next();
+
   } catch (error) {
     return failure(
       res,
@@ -316,9 +341,10 @@ async function savePassword(userId, password) {
   if (error) throw error;
 }
 
-/* =========================
-   API IA
-========================= */
+
+// ==========================================
+// CONFIGURATION OPENROUTER
+// ==========================================
 
 function openRouterHeaders() {
   return {
@@ -327,9 +353,12 @@ function openRouterHeaders() {
     "HTTP-Referer": "https://marucesoldado752-ux.github.io",
     "X-Title": "TAYA IA"
   };
-}/* =========================
-   RECHERCHE WEB TAVILY
-========================= */
+}
+
+
+// ==========================================
+// RECHERCHE WEB TAVILY
+// ==========================================
 
 async function tavilySearch(query) {
   if (!TAVILY_API_KEY) {
@@ -387,9 +416,10 @@ function extractText(content) {
     .join("\n");
 }
 
-/* =========================
-   PAGE PRINCIPALE
-========================= */
+
+// ==========================================
+// PAGE PRINCIPALE
+// ==========================================
 
 app.get("/", (req, res) => {
   return success(res, {
@@ -401,9 +431,10 @@ app.get("/", (req, res) => {
   });
 });
 
-/* =========================
-   STATUT DU SERVEUR
-========================= */
+
+// ==========================================
+// STATUT DU SERVEUR
+// ==========================================
 
 app.get("/api/status", (req, res) => {
   return success(res, {
@@ -412,24 +443,21 @@ app.get("/api/status", (req, res) => {
     supabase: supabase ? "configured" : "not_configured",
     ai: OPENROUTER_API_KEY ? "configured" : "not_configured",
     web_search: TAVILY_API_KEY ? "configured" : "not_configured",
-    image_analysis: OPENROUTER_API_KEY
-      ? "available_if_model_supports_vision"
-      : "not_configured",
-    pdf_analysis: OPENROUTER_API_KEY
-      ? "available"
-      : "not_configured",
+    image_analysis: "not_implemented",
+    pdf_analysis: "not_implemented",
     voice_transcription: OPENROUTER_API_KEY
-      ? "available"
+      ? "configured_check_model"
       : "not_configured",
     voice_speech: OPENROUTER_API_KEY
-      ? "available"
+      ? "configured_check_model"
       : "not_configured"
   });
 });
 
-/* =========================
-   AUTHENTIFICATION
-========================= */
+
+// ==========================================
+// AUTHENTIFICATION ANCIENNE DÉSACTIVÉE
+// ==========================================
 
 app.post("/api/auth/access", (req, res) => {
   return failure(
@@ -447,17 +475,19 @@ app.post("/api/auth/legacy-reset", (req, res) => {
   );
 });
 
-/* INSCRIPTION */
+
+// ==========================================
+// INSCRIPTION
+// ==========================================
 
 app.post("/api/auth/register", async (req, res) => {
   try {
-    const name = String(req.body.name || "")
+    const name = String(req.body?.name || "")
       .trim()
       .slice(0, 100);
 
-    const phone = normalizePhone(req.body.phone);
-
-    const password = String(req.body.password || "");
+    const phone = normalizePhone(req.body?.phone);
+    const password = String(req.body?.password || "");
 
     if (
       !name ||
@@ -539,13 +569,15 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
-/* CONNEXION */
+
+// ==========================================
+// CONNEXION
+// ==========================================
 
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const phone = normalizePhone(req.body.phone);
-
-    const password = String(req.body.password || "");
+    const phone = normalizePhone(req.body?.phone);
+    const password = String(req.body?.password || "");
 
     if (!phone || !password) {
       return failure(
@@ -621,15 +653,16 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-/* RÉCUPÉRATION DU COMPTE */
+
+// ==========================================
+// RÉCUPÉRATION DU COMPTE
+// ==========================================
 
 app.post("/api/auth/recover", async (req, res) => {
   try {
-    const phone = normalizePhone(req.body.phone);
-
-    const code = String(req.body.recovery_code || "");
-
-    const newPassword = String(req.body.new_password || "");
+    const phone = normalizePhone(req.body?.phone);
+    const code = String(req.body?.recovery_code || "");
+    const newPassword = String(req.body?.new_password || "");
 
     if (
       !phone ||
@@ -703,7 +736,10 @@ app.post("/api/auth/recover", async (req, res) => {
   }
 });
 
-/* UTILISATEUR CONNECTÉ */
+
+// ==========================================
+// UTILISATEUR CONNECTÉ
+// ==========================================
 
 app.get("/api/auth/me", authenticate, (req, res) => {
   return success(res, {
@@ -711,9 +747,10 @@ app.get("/api/auth/me", authenticate, (req, res) => {
   });
 });
 
-/* =========================
-   HISTORIQUE DES DISCUSSIONS
-========================= */
+
+// ==========================================
+// HISTORIQUE DES DISCUSSIONS V12
+// ==========================================
 
 app.get("/api/history", authenticate, async (req, res) => {
   try {
@@ -726,6 +763,8 @@ app.get("/api/history", authenticate, async (req, res) => {
       });
 
     if (error) {
+      console.error("History:", error.message);
+
       return failure(
         res,
         500,
@@ -748,9 +787,10 @@ app.get("/api/history", authenticate, async (req, res) => {
   }
 });
 
-/* =========================
-   MÉMOIRE DE L'UTILISATEUR
-========================= */
+
+// ==========================================
+// MÉMOIRE UTILISATEUR V12
+// ==========================================
 
 app.get("/api/memory", authenticate, async (req, res) => {
   try {
@@ -781,12 +821,15 @@ app.get("/api/memory", authenticate, async (req, res) => {
   }
 });
 
-/* ENREGISTRER LA MÉMOIRE */
+
+// ==========================================
+// ENREGISTRER LA MÉMOIRE
+// ==========================================
 
 app.put("/api/memory", authenticate, async (req, res) => {
   try {
     const memory = String(
-      req.body.memory || ""
+      req.body?.memory || ""
     ).slice(0, 12000);
 
     const { data: existing, error: lookupError } =
@@ -797,11 +840,7 @@ app.put("/api/memory", authenticate, async (req, res) => {
         .maybeSingle();
 
     if (lookupError) {
-      return failure(
-        res,
-        500,
-        "Erreur de mémoire."
-      );
+      return failure(res, 500, "Erreur de mémoire.");
     }
 
     const result = existing
@@ -841,14 +880,15 @@ app.put("/api/memory", authenticate, async (req, res) => {
   }
 });
 
-/* =========================
-   ROUTE DE RECHERCHE WEB
-========================= */
+
+// ==========================================
+// RECHERCHE WEB
+// ==========================================
 
 app.post("/api/search", authenticate, async (req, res) => {
   try {
     const query = String(
-      req.body.query || ""
+      req.body?.query || ""
     ).trim().slice(0, 500);
 
     if (!query) {
@@ -864,11 +904,13 @@ app.post("/api/search", authenticate, async (req, res) => {
     return success(res, result);
 
   } catch (error) {
+    console.error("Search:", error.message);
+
     if (error.message === "TAVILY_NOT_CONFIGURED") {
       return failure(
         res,
         503,
-        "Recherche Web non configurée. Ajoute TAVILY_API_KEY dans Render."
+        "Recherche Web non configurée."
       );
     }
 
@@ -878,9 +920,11 @@ app.post("/api/search", authenticate, async (req, res) => {
       "La recherche Internet est momentanément indisponible."
     );
   }
-});// ==========================================
-// TAYA IA V19.0.1 — PARTIE 3
-// CHAT IA + RECHERCHE WEB + AUDIO
+});
+
+
+// ==========================================
+// NORMALISATION DES MESSAGES DU CHAT
 // ==========================================
 
 function normalizeChatMessages(messages) {
@@ -919,10 +963,13 @@ app.post("/api/chat", authenticate, async (req, res) => {
 
     const messages = normalizeChatMessages(body.messages || []);
 
-    if (question && (
-      messages.length === 0 ||
-      messages[messages.length - 1].content !== question
-    )) {
+    if (
+      question &&
+      (
+        messages.length === 0 ||
+        messages[messages.length - 1].content !== question
+      )
+    ) {
       messages.push({
         role: "user",
         content: question
@@ -941,7 +988,9 @@ app.post("/api/chat", authenticate, async (req, res) => {
       return failure(res, 400, "Question utilisateur introuvable.");
     }
 
-    // Récupération de la mémoire personnelle
+
+    // MÉMOIRE UTILISATEUR
+
     let userMemory = "";
 
     try {
@@ -952,32 +1001,42 @@ app.post("/api/chat", authenticate, async (req, res) => {
         .maybeSingle();
 
       if (!memoryResult.error && memoryResult.data) {
-        userMemory = String(memoryResult.data.memory || "").slice(0, 8000);
+        userMemory = String(
+          memoryResult.data.memory || ""
+        ).slice(0, 8000);
       }
+
     } catch (error) {
       console.error("Memory read error:", error.message);
     }
 
-    // Recherche Web facultative
+
+    // RECHERCHE WEB FACULTATIVE
+
     let webContext = "";
 
     if (body.web_search === true && TAVILY_API_KEY) {
       try {
-        const searchResult = await tavilySearch(lastUserMessage.content);
+        const searchResult = await tavilySearch(
+          lastUserMessage.content
+        );
 
-        if (searchResult) {
-          webContext = `
+        webContext = `
 INFORMATIONS TROUVÉES SUR LE WEB :
-${searchResult}
+
+${JSON.stringify(searchResult, null, 2)}
 
 Utilise ces informations avec prudence.
 Ne présente pas une information non vérifiée comme certaine.
 `;
-        }
+
       } catch (error) {
         console.error("Web search error:", error.message);
       }
     }
+
+
+    // INSTRUCTIONS DE TAYA IA
 
     const systemPrompt = `
 Tu es TAYA IA V19.0.1, un assistant intelligent créé par Maruce Soldado en Guinée 🇬🇳.
@@ -999,6 +1058,9 @@ ${userMemory || "Aucune mémoire personnelle enregistrée."}
 
 ${webContext}
 `;
+
+
+    // APPEL OPENROUTER
 
     const apiResponse = await fetch(
       "https://openrouter.ai/api/v1/chat/completions",
@@ -1032,13 +1094,21 @@ ${webContext}
       );
     }
 
-    const answer = result.choices?.[0]?.message?.content;
+    const answer = extractText(
+      result.choices?.[0]?.message?.content
+    );
 
     if (!answer) {
-      return failure(res, 502, "L'IA n'a retourné aucune réponse.");
+      return failure(
+        res,
+        502,
+        "L'IA n'a retourné aucune réponse."
+      );
     }
 
-    // Sauvegarde de la conversation dans l'historique V12
+
+    // SAUVEGARDE HISTORIQUE V12
+
     try {
       const rows = [
         {
@@ -1058,8 +1128,12 @@ ${webContext}
         .insert(rows);
 
       if (saveResult.error) {
-        console.error("Chat history error:", saveResult.error.message);
+        console.error(
+          "Chat history error:",
+          saveResult.error.message
+        );
       }
+
     } catch (error) {
       console.error("Chat save error:", error.message);
     }
@@ -1074,7 +1148,11 @@ ${webContext}
   } catch (error) {
     console.error("Chat error:", error);
 
-    return failure(res, 500, "Une erreur est survenue pendant la discussion.");
+    return failure(
+      res,
+      500,
+      "Une erreur est survenue pendant la discussion."
+    );
   }
 });
 
@@ -1083,154 +1161,189 @@ ${webContext}
 // TRANSCRIPTION AUDIO
 // ==========================================
 
-app.post("/api/audio/transcriptions", authenticate, async (req, res) => {
-  try {
-    if (!OPENROUTER_API_KEY) {
-      return failure(res, 503, "Service audio non configuré.");
-    }
-
-    const {
-      audio_base64,
-      filename,
-      mime_type
-    } = req.body || {};
-
-    if (!audio_base64) {
-      return failure(res, 400, "Fichier audio manquant.");
-    }
-
-    const cleanBase64 = String(audio_base64)
-      .replace(/^data:[^;]+;base64,/, "");
-
-    const audioBuffer = Buffer.from(cleanBase64, "base64");
-
-    if (!audioBuffer.length || audioBuffer.length > 20 * 1024 * 1024) {
-      return failure(res, 400, "Fichier audio invalide ou trop volumineux.");
-    }
-
-    const form = new FormData();
-
-    const audioBlob = new Blob(
-      [audioBuffer],
-      { type: mime_type || "audio/webm" }
-    );
-
-    form.append(
-      "file",
-      audioBlob,
-      filename || "taya-audio.webm"
-    );
-
-    form.append(
-      "model",
-      OPENROUTER_STT_MODEL || "openai/whisper-1"
-    );
-
-    const response = await fetch(
-      "https://openrouter.ai/api/v1/audio/transcriptions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENROUTER_API_KEY}`
-        },
-        body: form
+app.post(
+  "/api/audio/transcriptions",
+  authenticate,
+  async (req, res) => {
+    try {
+      if (!OPENROUTER_API_KEY) {
+        return failure(
+          res,
+          503,
+          "Service audio non configuré."
+        );
       }
-    );
 
-    const result = await response.json();
+      const {
+        audio_base64,
+        filename,
+        mime_type
+      } = req.body || {};
 
-    if (!response.ok) {
-      console.error("Transcription error:", result);
+      if (!audio_base64) {
+        return failure(
+          res,
+          400,
+          "Fichier audio manquant."
+        );
+      }
+
+      const cleanBase64 = String(audio_base64)
+        .replace(/^data:[^;]+;base64,/, "");
+
+      const audioBuffer = Buffer.from(
+        cleanBase64,
+        "base64"
+      );
+
+      if (
+        !audioBuffer.length ||
+        audioBuffer.length > 18 * 1024 * 1024
+      ) {
+        return failure(
+          res,
+          400,
+          "Fichier audio invalide ou trop volumineux."
+        );
+      }
+
+      const form = new FormData();
+
+      const audioBlob = new Blob(
+        [audioBuffer],
+        {
+          type: mime_type || "audio/webm"
+        }
+      );
+
+      form.append(
+        "file",
+        audioBlob,
+        filename || "taya-audio.webm"
+      );
+
+      form.append(
+        "model",
+        OPENROUTER_STT_MODEL || "openai/whisper-1"
+      );
+
+      const response = await fetch(
+        "https://openrouter.ai/api/v1/audio/transcriptions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${OPENROUTER_API_KEY}`
+          },
+          body: form
+        }
+      );
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        console.error("Transcription error:", result);
+
+        return failure(
+          res,
+          response.status,
+          result.error?.message || "Transcription impossible."
+        );
+      }
+
+      return success(res, {
+        text: result.text || "",
+        version: VERSION
+      });
+
+    } catch (error) {
+      console.error("Audio transcription error:", error);
 
       return failure(
         res,
-        response.status,
-        result.error?.message || "Transcription impossible."
+        500,
+        "Erreur pendant la transcription audio."
       );
     }
-
-    return success(res, {
-      text: result.text || "",
-      version: VERSION
-    });
-
-  } catch (error) {
-    console.error("Audio transcription error:", error);
-
-    return failure(res, 500, "Erreur pendant la transcription audio.");
   }
-});
+);
 
 
 // ==========================================
 // GÉNÉRATION VOCALE
 // ==========================================
 
-app.post("/api/audio/speech", authenticate, async (req, res) => {
-  try {
-    if (!OPENROUTER_API_KEY) {
-      return failure(res, 503, "Service vocal non configuré.");
-    }
-
-    const textToSpeak = String(req.body?.text || "").trim();
-
-    if (!textToSpeak) {
-      return failure(res, 400, "Texte manquant.");
-    }
-
-    if (textToSpeak.length > 5000) {
-      return failure(res, 400, "Texte trop long.");
-    }
-
-    const response = await fetch(
-      "https://openrouter.ai/api/v1/audio/speech",
-      {
-        method: "POST",
-        headers: {
-          ...openRouterHeaders(),
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: OPENROUTER_TTS_MODEL || "openai/tts-1",
-          input: textToSpeak,
-          voice: "alloy",
-          response_format: "mp3"
-        })
+app.post(
+  "/api/audio/speech",
+  authenticate,
+  async (req, res) => {
+    try {
+      if (!OPENROUTER_API_KEY) {
+        return failure(
+          res,
+          503,
+          "Service vocal non configuré."
+        );
       }
-    );
 
-    if (!response.ok) {
-      const errorText = await response.text();
+      const textToSpeak = String(
+        req.body?.text || ""
+      ).trim();
 
-      console.error("Speech error:", errorText);
+      if (!textToSpeak) {
+        return failure(res, 400, "Texte manquant.");
+      }
 
-      return failure(res, response.status, "Génération vocale impossible.");
+      if (textToSpeak.length > 5000) {
+        return failure(res, 400, "Texte trop long.");
+      }
+
+      const response = await fetch(
+        "https://openrouter.ai/api/v1/audio/speech",
+        {
+          method: "POST",
+          headers: openRouterHeaders(),
+          body: JSON.stringify({
+            model: OPENROUTER_TTS_MODEL || "openai/tts-1",
+            input: textToSpeak,
+            voice: "alloy",
+            response_format: "mp3"
+          })
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+
+        console.error("Speech error:", errorText);
+
+        return failure(
+          res,
+          response.status,
+          "Génération vocale impossible."
+        );
+      }
+
+      const audioBuffer = Buffer.from(
+        await response.arrayBuffer()
+      );
+
+      return res
+        .status(200)
+        .set("Content-Type", "audio/mpeg")
+        .set("Content-Length", String(audioBuffer.length))
+        .send(audioBuffer);
+
+    } catch (error) {
+      console.error("Speech generation error:", error);
+
+      return failure(
+        res,
+        500,
+        "Erreur pendant la génération vocale."
+      );
     }
-
-    const audioBuffer = Buffer.from(
-      await response.arrayBuffer()
-    );
-
-    return res
-      .status(200)
-      .set("Content-Type", "audio/mpeg")
-      .set("Content-Length", String(audioBuffer.length))
-      .send(audioBuffer);
-
-  } catch (error) {
-    console.error("Speech generation error:", error);
-
-    return failure(res, 500, "Erreur pendant la génération vocale.");
   }
-});
-
-
-// ==========================================
-// FIN DE LA PARTIE 3
-// ==========================================// ==========================================
-// TAYA IA V19.0.1 — PARTIE 4
-// MESSAGES + ADMINISTRATION + SERVEUR
-// ==========================================
+);
 
 
 // ==========================================
@@ -1239,10 +1352,16 @@ app.post("/api/audio/speech", authenticate, async (req, res) => {
 
 app.post("/api/contact", authenticate, async (req, res) => {
   try {
-    const message = String(req.body?.message || "").trim();
+    const message = String(
+      req.body?.message || ""
+    ).trim();
 
     if (!message) {
-      return failure(res, 400, "Écris un message avant de l'envoyer.");
+      return failure(
+        res,
+        400,
+        "Écris un message avant de l'envoyer."
+      );
     }
 
     if (message.length > 5000) {
@@ -1262,7 +1381,12 @@ app.post("/api/contact", authenticate, async (req, res) => {
 
     if (error) {
       console.error("Contact message error:", error.message);
-      return failure(res, 500, "Impossible d'envoyer ton message.");
+
+      return failure(
+        res,
+        500,
+        "Impossible d'envoyer ton message."
+      );
     }
 
     return success(res, {
@@ -1272,7 +1396,12 @@ app.post("/api/contact", authenticate, async (req, res) => {
 
   } catch (error) {
     console.error("Contact error:", error);
-    return failure(res, 500, "Erreur pendant l'envoi du message.");
+
+    return failure(
+      res,
+      500,
+      "Erreur pendant l'envoi du message."
+    );
   }
 });
 
@@ -1281,28 +1410,44 @@ app.post("/api/contact", authenticate, async (req, res) => {
 // LIRE SES MESSAGES AVEC MARUCE
 // ==========================================
 
-app.get("/api/contact/messages", authenticate, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("taya_v19_support_messages")
-      .select("*")
-      .eq("user_id", req.user.id)
-      .order("created_at", { ascending: true });
+app.get(
+  "/api/contact/messages",
+  authenticate,
+  async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from("taya_v19_support_messages")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .order("created_at", {
+          ascending: true
+        });
 
-    if (error) {
-      console.error("Contact messages error:", error.message);
-      return failure(res, 500, "Impossible de charger les messages.");
+      if (error) {
+        console.error("Contact messages error:", error.message);
+
+        return failure(
+          res,
+          500,
+          "Impossible de charger les messages."
+        );
+      }
+
+      return success(res, {
+        messages: data || []
+      });
+
+    } catch (error) {
+      console.error("Contact inbox error:", error);
+
+      return failure(
+        res,
+        500,
+        "Erreur pendant le chargement des messages."
+      );
     }
-
-    return success(res, {
-      messages: data || []
-    });
-
-  } catch (error) {
-    console.error("Contact inbox error:", error);
-    return failure(res, 500, "Erreur pendant le chargement des messages.");
   }
-});
+);
 
 
 // ==========================================
@@ -1318,11 +1463,18 @@ app.get(
       const { data, error } = await supabase
         .from("taya_v13_users")
         .select("id, name, phone, email, avatar_url, role, created_at")
-        .order("created_at", { ascending: false });
+        .order("created_at", {
+          ascending: false
+        });
 
       if (error) {
         console.error("Admin users error:", error.message);
-        return failure(res, 500, "Impossible de charger les utilisateurs.");
+
+        return failure(
+          res,
+          500,
+          "Impossible de charger les utilisateurs."
+        );
       }
 
       return success(res, {
@@ -1331,7 +1483,12 @@ app.get(
 
     } catch (error) {
       console.error("Admin users error:", error);
-      return failure(res, 500, "Erreur pendant le chargement des utilisateurs.");
+
+      return failure(
+        res,
+        500,
+        "Erreur pendant le chargement des utilisateurs."
+      );
     }
   }
 );
@@ -1350,11 +1507,18 @@ app.get(
       const { data, error } = await supabase
         .from("taya_v19_support_messages")
         .select("*")
-        .order("created_at", { ascending: false });
+        .order("created_at", {
+          ascending: false
+        });
 
       if (error) {
         console.error("Admin messages error:", error.message);
-        return failure(res, 500, "Impossible de charger les messages.");
+
+        return failure(
+          res,
+          500,
+          "Impossible de charger les messages."
+        );
       }
 
       return success(res, {
@@ -1363,7 +1527,12 @@ app.get(
 
     } catch (error) {
       console.error("Admin messages error:", error);
-      return failure(res, 500, "Erreur pendant le chargement des messages.");
+
+      return failure(
+        res,
+        500,
+        "Erreur pendant le chargement des messages."
+      );
     }
   }
 );
@@ -1379,29 +1548,51 @@ app.post(
   requireAdmin,
   async (req, res) => {
     try {
-      const userId = String(req.params.userId || "").trim();
-      const message = String(req.body?.message || "").trim();
+      const userId = String(
+        req.params.userId || ""
+      ).trim();
+
+      const message = String(
+        req.body?.message || ""
+      ).trim();
 
       if (!userId) {
-        return failure(res, 400, "Utilisateur introuvable.");
+        return failure(
+          res,
+          400,
+          "Utilisateur introuvable."
+        );
       }
 
       if (!message) {
-        return failure(res, 400, "La réponse est vide.");
+        return failure(
+          res,
+          400,
+          "La réponse est vide."
+        );
       }
 
       if (message.length > 5000) {
-        return failure(res, 400, "Réponse trop longue.");
+        return failure(
+          res,
+          400,
+          "Réponse trop longue."
+        );
       }
 
-      const { data: user, error: userError } = await supabase
-        .from("taya_v13_users")
-        .select("id")
-        .eq("id", userId)
-        .maybeSingle();
+      const { data: user, error: userError } =
+        await supabase
+          .from("taya_v13_users")
+          .select("id")
+          .eq("id", userId)
+          .maybeSingle();
 
       if (userError || !user) {
-        return failure(res, 404, "Utilisateur introuvable.");
+        return failure(
+          res,
+          404,
+          "Utilisateur introuvable."
+        );
       }
 
       const { data, error } = await supabase
@@ -1417,7 +1608,12 @@ app.post(
 
       if (error) {
         console.error("Admin reply error:", error.message);
-        return failure(res, 500, "Impossible d'envoyer la réponse.");
+
+        return failure(
+          res,
+          500,
+          "Impossible d'envoyer la réponse."
+        );
       }
 
       return success(res, {
@@ -1427,7 +1623,12 @@ app.post(
 
     } catch (error) {
       console.error("Admin reply error:", error);
-      return failure(res, 500, "Erreur pendant l'envoi de la réponse.");
+
+      return failure(
+        res,
+        500,
+        "Erreur pendant l'envoi de la réponse."
+      );
     }
   }
 );
@@ -1438,7 +1639,11 @@ app.post(
 // ==========================================
 
 app.use((req, res) => {
-  return failure(res, 404, "Route introuvable.");
+  return failure(
+    res,
+    404,
+    "Route introuvable."
+  );
 });
 
 
@@ -1453,7 +1658,11 @@ app.use((error, req, res, next) => {
     return next(error);
   }
 
-  return failure(res, 500, "Une erreur interne est survenue.");
+  return failure(
+    res,
+    500,
+    "Une erreur interne est survenue."
+  );
 });
 
 
@@ -1468,5 +1677,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Serveur démarré sur le port ${PORT}`);
   console.log(`Supabase : ${supabase ? "CONFIGURÉ" : "NON CONFIGURÉ"}`);
   console.log(`OpenRouter : ${OPENROUTER_API_KEY ? "CONFIGURÉ" : "NON CONFIGURÉ"}`);
+  console.log(`Tavily : ${TAVILY_API_KEY ? "CONFIGURÉ" : "NON CONFIGURÉ"}`);
   console.log("------------------------------------");
 });

@@ -1,10 +1,16 @@
 /**
- * TAYA IA — API V21.0.2
- * Backend Express + Supabase + OpenRouter + Tavily
+ * TAYA IA — API V21.0.3
+ * Backend officiel by Maruce Soldado 🇬🇳
+ * Express + Supabase + OpenRouter + Tavily
  *
- * Clé primaire Supabase : id
- * Nom utilisateur : full_name
- * Les anciennes données V12/V19 sont conservées.
+ * Table utilisateurs :
+ * taya_v13_users
+ *
+ * Colonnes :
+ * id, phone, name, password, password_hash,
+ * email, avatar_url, created_at, updated_at,
+ * recovery_code_hash, role, must_reset_password,
+ * last_seen_at
  */
 
 require("dotenv").config();
@@ -16,15 +22,15 @@ const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
+const { promisify } = require("util");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-const PORT = Number(process.env.PORT || 3000);
-const VERSION = "21.0.2";
+const PORT = process.env.PORT || 3000;
+const VERSION = "21.0.3";
 
-const OPENROUTER_URL =
-  "https://openrouter.ai/api/v1/chat/completions";
+const scryptAsync = promisify(crypto.scrypt);
 
 const {
   SUPABASE_URL,
@@ -39,23 +45,34 @@ const {
   ALLOWED_ORIGIN
 } = process.env;
 
+// -------------------- SUPABASE --------------------
+
 const SUPABASE_KEY =
-  SUPABASE_SECRET_KEY || SUPABASE_SERVICE_ROLE_KEY;
+  SUPABASE_SECRET_KEY ||
+  SUPABASE_SERVICE_ROLE_KEY;
 
 const supabase =
   SUPABASE_URL && SUPABASE_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_KEY, {
-        auth: {
-          autoRefreshToken: false,
-          persistSession: false
+    ? createClient(
+        SUPABASE_URL,
+        SUPABASE_KEY,
+        {
+          auth: {
+            autoRefreshToken: false,
+            persistSession: false
+          }
         }
-      })
+      )
     : null;
+
+// -------------------- ADMINISTRATEURS --------------------
 
 const ADMIN_PHONES = new Set([
   "+224663401157",
   "+224612768878"
 ]);
+
+// -------------------- SÉCURITÉ --------------------
 
 app.disable("x-powered-by");
 
@@ -70,7 +87,9 @@ const allowedOrigins = (
   "https://marucesoldado752-ux.github.io"
 )
   .split(",")
-  .map(origin => origin.trim().replace(/\/+$/, ""))
+  .map(origin =>
+    origin.trim().replace(/\/+$/, "")
+  )
   .filter(Boolean);
 
 app.use(
@@ -78,15 +97,18 @@ app.use(
     origin(origin, callback) {
       if (
         !origin ||
-        allowedOrigins.includes(origin.replace(/\/+$/, ""))
+        allowedOrigins.includes(
+          origin.replace(/\/+$/, "")
+        )
       ) {
         return callback(null, true);
       }
 
       return callback(
-        new Error("Origine non autorisée par CORS")
+        new Error("Origine non autorisée")
       );
     },
+
     methods: [
       "GET",
       "POST",
@@ -95,15 +117,19 @@ app.use(
       "DELETE",
       "OPTIONS"
     ],
+
     allowedHeaders: [
       "Content-Type",
       "Authorization"
-    ],
-    credentials: false
+    ]
   })
 );
 
-app.use(express.json({ limit: "25mb" }));
+app.use(
+  express.json({
+    limit: "25mb"
+  })
+);
 
 app.use(
   express.urlencoded({
@@ -111,6 +137,8 @@ app.use(
     limit: "25mb"
   })
 );
+
+// -------------------- LIMITATION DES REQUÊTES --------------------
 
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -128,7 +156,7 @@ const authLimiter = rateLimit({
 
 app.use("/api/", generalLimiter);
 
-// RÉPONSES STANDARD
+// -------------------- FONCTIONS GÉNÉRALES --------------------
 
 function ok(res, data = {}, status = 200) {
   return res.status(status).json({
@@ -144,54 +172,102 @@ function fail(res, message, status = 400) {
   });
 }
 
-// NORMALISATION DU TÉLÉPHONE
-
-function normalizePhone(value) {
-  let phone = String(value || "")
+function cleanText(value, max = 12000) {
+  return String(
+    value == null ? "" : value
+  )
     .trim()
-    .replace(/[^\d+]/g, "");
-
-  if (phone && !phone.startsWith("+")) {
-    phone = "+" + phone;
-  }
-
-  return phone;
+    .slice(0, max);
 }
 
-// ADMINISTRATEUR
+// -------------------- NORMALISATION TÉLÉPHONE --------------------
+
+function normalizePhone(value) {
+  let digits = String(value || "")
+    .replace(/\D/g, "");
+
+  if (!digits) return "";
+
+  // Numéro guinéen local
+  if (digits.length === 9) {
+    digits = "224" + digits;
+  }
+
+  return "+" + digits;
+}
+
+function phoneVariants(value) {
+  const canonical = normalizePhone(value);
+
+  if (!canonical) return [];
+
+  const digits = canonical.slice(1);
+
+  const variants = new Set([
+    canonical,
+    digits
+  ]);
+
+  // Compatibilité avec les anciens numéros guinéens
+  if (
+    digits.startsWith("224") &&
+    digits.length === 12
+  ) {
+    variants.add(digits.slice(3));
+    variants.add("+" + digits.slice(3));
+  }
+
+  return [...variants];
+}
+
+// -------------------- ADMIN --------------------
 
 function isAdmin(user) {
   return ADMIN_PHONES.has(
-    normalizePhone(user && user.phone)
+    normalizePhone(user?.phone)
   );
 }
 
-// INFORMATIONS PUBLIQUES DU COMPTE
+// -------------------- DONNÉES PUBLIQUES UTILISATEUR --------------------
 
 function publicUser(user) {
   if (!user) return null;
 
   const name =
-    user.full_name ||
     user.name ||
+    user.full_name ||
     "";
 
   return {
     id: user.id,
     p: user.id,
+
     name,
     full_name: name,
-    phone: user.phone || "",
+
+    phone: normalizePhone(user.phone),
+
     email: user.email || "",
-    avatar_url: user.avatar_url || "",
-    role: isAdmin(user) ? "admin" : "user",
-    created_at: user.created_at || null,
-    last_seen_at: user.last_seen_at || null,
-    must_reset_password: !!user.must_reset_password
+
+    avatar_url:
+      user.avatar_url || "",
+
+    role: isAdmin(user)
+      ? "admin"
+      : "user",
+
+    created_at:
+      user.created_at || null,
+
+    last_seen_at:
+      user.last_seen_at || null,
+
+    must_reset_password:
+      !!user.must_reset_password
   };
 }
 
-// VÉRIFICATION DES SERVICES
+// -------------------- VÉRIFICATION SERVICES --------------------
 
 function requireServices(req, res, next) {
   if (!supabase) {
@@ -213,7 +289,7 @@ function requireServices(req, res, next) {
   next();
 }
 
-// CRÉATION DU TOKEN
+// -------------------- TOKEN JWT --------------------
 
 function signToken(user) {
   return jwt.sign(
@@ -228,90 +304,164 @@ function signToken(user) {
   );
 }
 
-// NETTOYAGE DES TEXTES
+// -------------------- VÉRIFICATION MOT DE PASSE --------------------
 
-function cleanText(value, max = 12000) {
-  return String(value == null ? "" : value)
-    .trim()
-    .slice(0, max);
-}
+async function verifyStoredHash(
+  storedValue,
+  supplied
+) {
+  const stored = String(
+    storedValue || ""
+  );
 
-// EXTRACTION DU TEXTE IA
+  if (!stored) return false;
 
-function extractText(content) {
-  if (typeof content === "string") {
-    return content;
+  // BCRYPT
+  if (stored.startsWith("$2")) {
+    try {
+      return await bcrypt.compare(
+        supplied,
+        stored
+      );
+    } catch (_) {
+      return false;
+    }
   }
 
-  if (Array.isArray(content)) {
-    return content.map(part => {
-      if (typeof part === "string") {
-        return part;
+  // SCRYPT
+  if (stored.startsWith("scrypt$")) {
+    try {
+      const parts = stored.split("$");
+
+      if (parts.length !== 3) {
+        return false;
       }
 
+      const salt = parts[1];
+      const expectedHex = parts[2];
+
+      if (
+        !salt ||
+        !/^[a-f0-9]+$/i.test(expectedHex) ||
+        expectedHex.length % 2
+      ) {
+        return false;
+      }
+
+      const expected = Buffer.from(
+        expectedHex,
+        "hex"
+      );
+
+      const actual = await scryptAsync(
+        supplied,
+        salt,
+        expected.length
+      );
+
       return (
-        part && (part.text || part.content)
-      ) || "";
-    }).join("\n");
+        actual.length === expected.length &&
+        crypto.timingSafeEqual(
+          actual,
+          expected
+        )
+      );
+
+    } catch (error) {
+      console.error(
+        "Erreur SCRYPT:",
+        error.message
+      );
+
+      return false;
+    }
   }
 
-  return "";
-}
+  // SHA256
+  if (/^[a-f0-9]{64}$/i.test(stored)) {
+    const digest = crypto
+      .createHash("sha256")
+      .update(supplied)
+      .digest("hex");
 
-// MOT DE PASSE
+    return crypto.timingSafeEqual(
+      Buffer.from(digest, "hex"),
+      Buffer.from(stored.toLowerCase(), "hex")
+    );
+  }
+
+  // Ancien mot de passe en clair
+  return stored === supplied;
+}
 
 async function makePasswordHash(password) {
-  return bcrypt.hash(String(password), 12);
+  return bcrypt.hash(
+    String(password),
+    12
+  );
 }
 
-async function verifyPassword(user, password) {
-  const supplied = String(password || "");
+async function verifyPassword(
+  user,
+  password
+) {
+  if (
+    user.password_hash &&
+    await verifyStoredHash(
+      user.password_hash,
+      password
+    )
+  ) {
+    return true;
+  }
 
-  if (user.password_hash) {
-    const stored = String(user.password_hash);
-
-    if (stored.startsWith("$2")) {
-      return bcrypt.compare(supplied, stored);
-    }
-
-    if (/^[a-f0-9]{64}$/i.test(stored)) {
-      const digest = crypto
-        .createHash("sha256")
-        .update(supplied)
-        .digest("hex");
-
-      return crypto.timingSafeEqual(
-        Buffer.from(digest),
-        Buffer.from(stored.toLowerCase())
-      );
-    }
-
-    return stored === supplied;
+  if (
+    user.password &&
+    await verifyStoredHash(
+      user.password,
+      password
+    )
+  ) {
+    return true;
   }
 
   return false;
 }
 
-async function upgradePassword(user, password) {
+// -------------------- MISE À JOUR MOT DE PASSE --------------------
+
+async function upgradePassword(
+  user,
+  password
+) {
   const password_hash =
     await makePasswordHash(password);
 
   const { error } = await supabase
     .from("taya_v13_users")
-    .update({ password_hash })
+    .update({
+      password_hash,
+      password: null,
+      must_reset_password: false,
+      updated_at: new Date().toISOString()
+    })
     .eq("id", user.id);
 
   if (error) {
     console.error(
-      "Password upgrade:",
+      "Mise à jour mot de passe:",
       error.message
     );
   }
 }
 
-// AUTHENTIFICATION
+// -------------------- AUTHENTIFICATION --------------------
 
-async function authenticate(req, res, next) {
+async function authenticate(
+  req,
+  res,
+  next
+) {
   try {
     const header =
       req.headers.authorization || "";
@@ -321,22 +471,35 @@ async function authenticate(req, res, next) {
       : "";
 
     if (!token) {
-      return fail(res, "Connexion requise", 401);
+      return fail(
+        res,
+        "Connexion requise",
+        401
+      );
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(
+      token,
+      JWT_SECRET
+    );
 
-    const { data: user, error } = await supabase
-      .from("taya_v13_users")
-      .select("*")
-      .eq("id", decoded.id)
-      .maybeSingle();
+    const { data: user, error } =
+      await supabase
+        .from("taya_v13_users")
+        .select("*")
+        .eq("id", decoded.id)
+        .maybeSingle();
 
     if (error || !user) {
-      return fail(res, "Session invalide", 401);
+      return fail(
+        res,
+        "Session invalide",
+        401
+      );
     }
 
     req.user = user;
+
     next();
 
   } catch (error) {
@@ -348,7 +511,7 @@ async function authenticate(req, res, next) {
   }
 }
 
-// PROTECTION ADMIN
+// -------------------- PROTECTION ADMIN --------------------
 
 function requireAdmin(req, res, next) {
   if (!isAdmin(req.user)) {
@@ -360,9 +523,36 @@ function requireAdmin(req, res, next) {
   }
 
   next();
-} // =====================================================
-// OUTILS IA — OPENROUTER
-// =====================================================
+}
+
+// ============================================================
+// PARTIE 2/3 À AJOUTER À LA SUITE
+// ============================================================// ============================================================
+// TAYA IA V21.0.3
+// PARTIE 2/3
+// IA + HISTORIQUE + MÉMOIRE + RECHERCHE WEB
+// ============================================================
+
+// -------------------- OPENROUTER --------------------
+
+const OPENROUTER_URL =
+  "https://openrouter.ai/api/v1/chat/completions";
+
+function extractText(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content.map(part =>
+      typeof part === "string"
+        ? part
+        : (part && (part.text || part.content)) || ""
+    ).join("\n");
+  }
+
+  return "";
+}
 
 async function callAI({
   messages,
@@ -376,29 +566,41 @@ async function callAI({
     );
   }
 
-  const response = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://marucesoldado752-ux.github.io",
-      "X-Title": "TAYA IA by Maruce"
-    },
-    body: JSON.stringify({
-      model:
-        model ||
-        OPENROUTER_MODEL ||
-        "openai/gpt-4o-mini",
-      messages,
-      temperature,
-      max_tokens
-    })
-  });
+  const response = await fetch(
+    OPENROUTER_URL,
+    {
+      method: "POST",
 
-  const result = await response.json();
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer":
+          "https://marucesoldado752-ux.github.io",
+        "X-Title": "TAYA IA by Maruce"
+      },
+
+      body: JSON.stringify({
+        model:
+          model ||
+          OPENROUTER_MODEL ||
+          "openai/gpt-4o-mini",
+
+        messages,
+        temperature,
+        max_tokens
+      })
+    }
+  );
+
+  const result = await response
+    .json()
+    .catch(() => ({}));
 
   if (!response.ok) {
-    console.error("OpenRouter:", result);
+    console.error(
+      "Erreur OpenRouter:",
+      result
+    );
 
     throw new Error(
       result.error?.message ||
@@ -416,14 +618,13 @@ async function callAI({
   return extractText(answer);
 }
 
-// =====================================================
-// RECHERCHE WEB — TAVILY
-// =====================================================
+// -------------------- RECHERCHE WEB TAVILY --------------------
 
 async function searchWeb(query) {
   if (!TAVILY_API_KEY) {
     return {
       available: false,
+      answer: "",
       results: []
     };
   }
@@ -432,9 +633,11 @@ async function searchWeb(query) {
     "https://api.tavily.com/search",
     {
       method: "POST",
+
       headers: {
         "Content-Type": "application/json"
       },
+
       body: JSON.stringify({
         api_key: TAVILY_API_KEY,
         query: cleanText(query, 1000),
@@ -445,17 +648,26 @@ async function searchWeb(query) {
     }
   );
 
-  const data = await response.json();
+  const data = await response
+    .json()
+    .catch(() => ({}));
 
   if (!response.ok) {
-    console.error("Tavily:", data);
+    console.error(
+      "Erreur Tavily:",
+      data
+    );
 
-    throw new Error("Erreur de recherche Web");
+    throw new Error(
+      "Erreur de recherche Web"
+    );
   }
 
   return {
     available: true,
+
     answer: data.answer || "",
+
     results: (data.results || []).map(item => ({
       title: item.title || "",
       url: item.url || "",
@@ -464,14 +676,13 @@ async function searchWeb(query) {
   };
 }
 
-// =====================================================
-// DÉTECTION DE LA RECHERCHE WEB
-// =====================================================
-
 function shouldSearch(message, requested) {
-  if (requested === true) return true;
+  if (requested === true) {
+    return true;
+  }
 
-  const text = String(message || "").toLowerCase();
+  const text = String(message || "")
+    .toLowerCase();
 
   const keywords = [
     "actualité",
@@ -496,12 +707,12 @@ function shouldSearch(message, requested) {
   );
 }
 
-// =====================================================
-// HISTORIQUE DES CONVERSATIONS
-// =====================================================
+// -------------------- HISTORIQUE --------------------
 
 function normalizeHistory(history) {
-  if (!Array.isArray(history)) return [];
+  if (!Array.isArray(history)) {
+    return [];
+  }
 
   return history
     .slice(-20)
@@ -510,6 +721,7 @@ function normalizeHistory(history) {
         item.role === "assistant"
           ? "assistant"
           : "user",
+
       content: cleanText(
         item.content || item.message || "",
         12000
@@ -518,7 +730,11 @@ function normalizeHistory(history) {
     .filter(item => item.content);
 }
 
-async function saveConversation(userId, role, message) {
+async function saveConversation(
+  userId,
+  role,
+  message
+) {
   const { error } = await supabase
     .from("taya_v12_messages")
     .insert({
@@ -535,9 +751,43 @@ async function saveConversation(userId, role, message) {
   }
 }
 
-// =====================================================
-// MÉMOIRE UTILISATEUR
-// =====================================================
+app.get(
+  "/api/history",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from("taya_v12_messages")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .limit(200);
+
+      if (error) {
+        throw error;
+      }
+
+      return ok(res, {
+        messages: data || [],
+        history: data || []
+      });
+
+    } catch (error) {
+      console.error(
+        "Historique:",
+        error
+      );
+
+      return fail(
+        res,
+        "Impossible de charger l'historique",
+        500
+      );
+    }
+  }
+);
+
+// -------------------- MÉMOIRE UTILISATEUR --------------------
 
 async function getUserMemory(userId) {
   const { data, error } = await supabase
@@ -547,21 +797,32 @@ async function getUserMemory(userId) {
     .maybeSingle();
 
   if (error) {
-    console.error("Lecture mémoire:", error.message);
+    console.error(
+      "Lecture mémoire:",
+      error.message
+    );
+
     return "";
   }
 
   return data?.memory || "";
 }
 
-async function saveUserMemory(userId, memory) {
-  const value = cleanText(memory, 12000);
+async function saveUserMemory(
+  userId,
+  memory
+) {
+  const value = cleanText(
+    memory,
+    12000
+  );
 
-  const { data, error: readError } = await supabase
-    .from("taya_v12_memories")
-    .select("*")
-    .eq("user_id", userId)
-    .maybeSingle();
+  const { data, error: readError } =
+    await supabase
+      .from("taya_v12_memories")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
 
   if (readError) {
     throw readError;
@@ -576,7 +837,9 @@ async function saveUserMemory(userId, memory) {
       })
       .eq("user_id", userId);
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
   } else {
     const { error } = await supabase
@@ -586,262 +849,13 @@ async function saveUserMemory(userId, memory) {
         memory: value
       });
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
   }
 
   return value;
 }
-
-// =====================================================
-// ROUTE DE TEST
-// =====================================================
-
-app.get("/", (req, res) => {
-  return ok(res, {
-    name: "TAYA IA",
-    version: VERSION,
-    server: "online",
-    message: "Bienvenue sur TAYA IA by Maruce"
-  });
-});
-
-app.get("/api", (req, res) => {
-  return ok(res, {
-    name: "TAYA IA API",
-    version: VERSION
-  });
-});
-
-app.get("/api/health", (req, res) => {
-  return ok(res, {
-    version: VERSION,
-    server: "online",
-    supabase: !!supabase,
-    ai: !!OPENROUTER_API_KEY,
-    web_search: !!TAVILY_API_KEY
-  });
-});
-
-// =====================================================
-// INSCRIPTION
-// =====================================================
-
-app.post(
-  "/api/auth/register",
-  authLimiter,
-  requireServices,
-  async (req, res) => {
-    try {
-      const full_name = cleanText(
-        req.body.full_name || req.body.name,
-        100
-      );
-
-      const phone = normalizePhone(
-        req.body.phone
-      );
-
-      const password = String(
-        req.body.password || ""
-      );
-
-      if (!full_name || !phone || !password) {
-        return fail(
-          res,
-          "Nom, téléphone et mot de passe obligatoires"
-        );
-      }
-
-      if (password.length < 6) {
-        return fail(
-          res,
-          "Le mot de passe doit contenir au moins 6 caractères"
-        );
-      }
-
-      const { data: existing, error: searchError } =
-        await supabase
-          .from("taya_v13_users")
-          .select("id")
-          .eq("phone", phone)
-          .maybeSingle();
-
-      if (searchError) {
-        console.error(searchError);
-        return fail(
-          res,
-          "Impossible de vérifier le compte",
-          500
-        );
-      }
-
-      if (existing) {
-        return fail(
-          res,
-          "Ce numéro possède déjà un compte"
-        );
-      }
-
-      const password_hash =
-        await makePasswordHash(password);
-
-      const { data: user, error } = await supabase
-        .from("taya_v13_users")
-        .insert({
-          full_name,
-          phone,
-          password_hash
-        })
-        .select("*")
-        .single();
-
-      if (error) {
-        console.error("Inscription:", error);
-
-        return fail(
-          res,
-          "Création du compte impossible. Vérifie les colonnes Supabase.",
-          500
-        );
-      }
-
-      return ok(res, {
-        token: signToken(user),
-        user: publicUser(user)
-      }, 201);
-
-    } catch (error) {
-      console.error(error);
-
-      return fail(
-        res,
-        "Erreur pendant l'inscription",
-        500
-      );
-    }
-  }
-);
-
-// =====================================================
-// CONNEXION
-// =====================================================
-
-app.post(
-  "/api/auth/login",
-  authLimiter,
-  requireServices,
-  async (req, res) => {
-    try {
-      const phone = normalizePhone(
-        req.body.phone
-      );
-
-      const password = String(
-        req.body.password || ""
-      );
-
-      if (!phone || !password) {
-        return fail(
-          res,
-          "Téléphone et mot de passe obligatoires"
-        );
-      }
-
-      const { data: user, error } = await supabase
-        .from("taya_v13_users")
-        .select("*")
-        .eq("phone", phone)
-        .maybeSingle();
-
-      if (error || !user) {
-        return fail(
-          res,
-          "Numéro ou mot de passe incorrect",
-          401
-        );
-      }
-
-      const valid = await verifyPassword(
-        user,
-        password
-      );
-
-      if (!valid) {
-        return fail(
-          res,
-          "Numéro ou mot de passe incorrect",
-          401
-        );
-      }
-
-      return ok(res, {
-        token: signToken(user),
-        user: publicUser(user)
-      });
-
-    } catch (error) {
-      console.error("Connexion:", error);
-
-      return fail(
-        res,
-        "Erreur pendant la connexion",
-        500
-      );
-    }
-  }
-);
-
-// =====================================================
-// COMPTE CONNECTÉ
-// =====================================================
-
-app.get(
-  "/api/auth/me",
-  requireServices,
-  authenticate,
-  (req, res) => {
-    return ok(res, {
-      user: publicUser(req.user)
-    });
-  }
-);
-
-// =====================================================
-// HISTORIQUE
-// =====================================================
-
-app.get(
-  "/api/history",
-  requireServices,
-  authenticate,
-  async (req, res) => {
-    try {
-      const { data, error } = await supabase
-        .from("taya_v12_messages")
-        .select("*")
-        .eq("user_id", req.user.id)
-        .limit(200);
-
-      if (error) throw error;
-
-      return ok(res, {
-        messages: data || [],
-        history: data || []
-      });
-
-    } catch (error) {
-      console.error("Historique:", error);
-
-      return fail(
-        res,
-        "Impossible de charger l'historique",
-        500
-      );
-    }
-  }
-); // =====================================================
-// MÉMOIRE
-// =====================================================
 
 app.get(
   "/api/memory",
@@ -849,12 +863,19 @@ app.get(
   authenticate,
   async (req, res) => {
     try {
-      const memory = await getUserMemory(req.user.id);
+      const memory = await getUserMemory(
+        req.user.id
+      );
 
-      return ok(res, { memory });
+      return ok(res, {
+        memory
+      });
 
     } catch (error) {
-      console.error("Mémoire:", error);
+      console.error(
+        "Mémoire:",
+        error
+      );
 
       return fail(
         res,
@@ -882,7 +903,10 @@ app.put(
       });
 
     } catch (error) {
-      console.error("Enregistrement mémoire:", error);
+      console.error(
+        "Enregistrement mémoire:",
+        error
+      );
 
       return fail(
         res,
@@ -893,9 +917,35 @@ app.put(
   }
 );
 
-// =====================================================
-// CHAT IA
-// =====================================================
+// -------------------- STATUT API --------------------
+
+app.get("/", (req, res) => {
+  return ok(res, {
+    name: "TAYA IA",
+    version: VERSION,
+    server: "online",
+    message: "Bienvenue sur TAYA IA by Maruce"
+  });
+});
+
+app.get("/api", (req, res) => {
+  return ok(res, {
+    name: "TAYA IA API",
+    version: VERSION
+  });
+});
+
+app.get("/api/health", (req, res) => {
+  return ok(res, {
+    version: VERSION,
+    server: "online",
+    supabase: !!supabase,
+    ai: !!OPENROUTER_API_KEY,
+    web_search: !!TAVILY_API_KEY
+  });
+});
+
+// -------------------- CHAT INTELLIGENT --------------------
 
 app.post(
   "/api/chat",
@@ -909,12 +959,15 @@ app.post(
       );
 
       if (!message) {
-        return fail(res, "Message vide");
+        return fail(
+          res,
+          "Message vide"
+        );
       }
 
-      // Accepte history ET messages
       const history = normalizeHistory(
-        req.body.history || req.body.messages
+        req.body.history ||
+        req.body.messages
       );
 
       const memory = await getUserMemory(
@@ -929,19 +982,30 @@ app.post(
         req.body.web_search
       );
 
-      if (searchRequested && TAVILY_API_KEY) {
+      // Recherche automatique si nécessaire
+      if (
+        searchRequested &&
+        TAVILY_API_KEY
+      ) {
         try {
-          const search = await searchWeb(message);
+          const search = await searchWeb(
+            message
+          );
 
           if (search.available) {
             webContext = [
               search.answer,
+
               ...(search.results || []).map(item =>
                 `${item.title}\n${item.content}\n${item.url}`
               )
-            ].filter(Boolean).join("\n\n");
 
-            searchResults = search.results || [];
+            ]
+              .filter(Boolean)
+              .join("\n\n");
+
+            searchResults =
+              search.results || [];
           }
 
         } catch (searchError) {
@@ -953,52 +1017,63 @@ app.post(
       }
 
       const systemPrompt = `
-Tu es TAYA IA, une intelligence artificielle moderne,
-rapide, précise et utile, créée par Maruce Soldado 🇬🇳.
+Tu es TAYA IA, une intelligence artificielle
+moderne, rapide, précise et utile,
+créée par Maruce Soldado 🇬🇳.
 
 RÈGLES :
-- Réponds dans la langue de l'utilisateur.
-- Donne une réponse directe et claire.
-- Évite les longues introductions.
-- Ne prétends jamais avoir effectué une action que tu n'as pas faite.
-- Pour les calculs, donne le résultat exact.
-- Pour le code, fournis du code complet et fonctionnel lorsque demandé.
-- Si tu ne connais pas une information, dis-le clairement.
-- Respecte la sécurité et la confidentialité.
-- Utilise la mémoire uniquement pour améliorer les réponses.
+
+1. Réponds dans la langue de l'utilisateur.
+2. Donne une réponse directe et claire.
+3. Évite les longues introductions.
+4. Ne prétends jamais avoir effectué une action
+   que tu n'as pas faite.
+5. Pour les calculs, donne le résultat exact.
+6. Pour le code, fournis un code complet
+   lorsque l'utilisateur le demande.
+7. Si tu ne connais pas une information,
+   dis-le clairement.
+8. Respecte la sécurité et la confidentialité.
+9. Utilise les informations Web disponibles.
+10. Ne présente pas une information non vérifiée
+    comme un fait.
 
 MÉMOIRE UTILISATEUR :
+
 ${memory || "Aucune mémoire enregistrée."}
 
 INFORMATIONS DE RECHERCHE WEB :
+
 ${webContext || "Aucune recherche Web effectuée."}
 `;
 
-      const messages = [
-        {
-          role: "system",
-          content: systemPrompt
-        },
-        ...history,
-        {
-          role: "user",
-          content: message
-        }
-      ];
-
       const answer = await callAI({
-        messages,
+        messages: [
+          {
+            role: "system",
+            content: systemPrompt
+          },
+
+          ...history,
+
+          {
+            role: "user",
+            content: message
+          }
+        ],
+
         temperature: 0.7,
         max_tokens: 4000
       });
 
-      // Sauvegarde dans l'ancienne table V12
+      // Sauvegarde du message utilisateur
       await saveConversation(
         req.user.id,
         "user",
         message
       );
 
+      // Sauvegarde de la réponse IA
       await saveConversation(
         req.user.id,
         "assistant",
@@ -1013,20 +1088,30 @@ ${webContext || "Aucune recherche Web effectuée."}
       });
 
     } catch (error) {
-      console.error("Chat IA:", error);
+      console.error(
+        "Chat IA:",
+        error
+      );
 
       return fail(
         res,
-        error.message || "Erreur du service IA",
+        error.message ||
+        "Erreur du service IA",
         500
       );
     }
   }
 );
 
-// =====================================================
-// ANALYSE D'IMAGE
-// =====================================================
+// ============================================================
+// FIN PARTIE 2/3
+// ============================================================// ============================================================
+// TAYA IA V21.0.3
+// PARTIE 3/3
+// IMAGES + PDF + CONTACTS + SUPPORT + ADMIN
+// ============================================================
+
+// -------------------- ANALYSE DES IMAGES --------------------
 
 app.post(
   "/api/chat/image",
@@ -1067,7 +1152,11 @@ app.post(
         imageUrl = `data:${mime};base64,${imageUrl}`;
       }
 
-      if (!/^data:image\/(jpeg|jpg|png|webp|gif);base64,/i.test(imageUrl)) {
+      if (
+        !/^data:image\/(jpeg|jpg|png|webp|gif);base64,/i.test(
+          imageUrl
+        )
+      ) {
         return fail(
           res,
           "Format d'image non pris en charge"
@@ -1084,7 +1173,7 @@ app.post(
           {
             role: "system",
             content:
-              "Tu es TAYA IA. Analyse les images avec précision. Décris uniquement ce qui est visible et réponds à la question."
+              "Tu es TAYA IA. Analyse les images avec précision. Décris uniquement ce qui est visible et réponds à la question de l'utilisateur."
           },
           {
             role: "user",
@@ -1102,6 +1191,7 @@ app.post(
             ]
           }
         ],
+
         max_tokens: 3000
       });
 
@@ -1111,20 +1201,22 @@ app.post(
       });
 
     } catch (error) {
-      console.error("Analyse image:", error);
+      console.error(
+        "Analyse image:",
+        error
+      );
 
       return fail(
         res,
-        error.message || "Analyse de l'image impossible",
+        error.message ||
+        "Analyse de l'image impossible",
         500
       );
     }
   }
 );
 
-// =====================================================
-// LECTURE PDF
-// =====================================================
+// -------------------- LECTURE DES PDF --------------------
 
 app.post(
   "/api/chat/pdf",
@@ -1146,13 +1238,19 @@ app.post(
       );
 
       if (!pdfBase64) {
-        return fail(res, "Fichier PDF manquant");
+        return fail(
+          res,
+          "Fichier PDF manquant"
+        );
       }
 
       const pdfParse = require("pdf-parse");
 
       const cleanBase64 = pdfBase64
-        .replace(/^data:application\/pdf;base64,/, "")
+        .replace(
+          /^data:application\/pdf;base64,/,
+          ""
+        )
         .replace(/\s/g, "");
 
       const buffer = Buffer.from(
@@ -1161,13 +1259,29 @@ app.post(
       );
 
       if (!buffer.length) {
-        return fail(res, "PDF vide ou invalide");
+        return fail(
+          res,
+          "PDF vide ou invalide"
+        );
       }
 
-      if (buffer.length > 15 * 1024 * 1024) {
+      if (
+        buffer.length >
+        15 * 1024 * 1024
+      ) {
         return fail(
           res,
           "Le PDF dépasse la limite de 15 Mo"
+        );
+      }
+
+      // Vérification de la signature PDF
+      if (
+        buffer.subarray(0, 5).toString() !== "%PDF-"
+      ) {
+        return fail(
+          res,
+          "Le fichier envoyé n'est pas un PDF valide"
         );
       }
 
@@ -1195,14 +1309,16 @@ app.post(
           {
             role: "system",
             content:
-              "Tu es TAYA IA. Tu analyses les documents fournis. Réponds précisément à la demande en utilisant le contenu du document."
+              "Tu es TAYA IA. Analyse les documents fournis et réponds précisément à la demande en utilisant le contenu du document."
           },
           {
             role: "user",
             content:
-              `QUESTION : ${question}\n\nCONTENU DU PDF :\n${documentText}`
+              `QUESTION : ${question}\n\n` +
+              `CONTENU DU PDF :\n${documentText}`
           }
         ],
+
         max_tokens: 4000
       });
 
@@ -1213,7 +1329,10 @@ app.post(
       });
 
     } catch (error) {
-      console.error("Analyse PDF:", error);
+      console.error(
+        "Analyse PDF:",
+        error
+      );
 
       return fail(
         res,
@@ -1224,9 +1343,7 @@ app.post(
   }
 );
 
-// =====================================================
-// CONTACT AVEC MARUCE
-// =====================================================
+// -------------------- CONTACT : ÉCRIRE À MARUCE --------------------
 
 async function createContact(req, res) {
   try {
@@ -1236,11 +1353,15 @@ async function createContact(req, res) {
     );
 
     if (!message) {
-      return fail(res, "Message vide");
+      return fail(
+        res,
+        "Message vide"
+      );
     }
 
     const subject = cleanText(
-      req.body.subject || "Message utilisateur",
+      req.body.subject ||
+      "Message utilisateur",
       150
     );
 
@@ -1253,15 +1374,24 @@ async function createContact(req, res) {
       .select("*")
       .single();
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
-    return ok(res, {
-      contact: data,
-      message: "Message envoyé à Maruce"
-    }, 201);
+    return ok(
+      res,
+      {
+        contact: data,
+        message: "Message envoyé à Maruce"
+      },
+      201
+    );
 
   } catch (error) {
-    console.error("Contact:", error);
+    console.error(
+      "Contact:",
+      error
+    );
 
     return fail(
       res,
@@ -1285,9 +1415,7 @@ app.post(
   createContact
 );
 
-// =====================================================
-// MESSAGES DE SUPPORT
-// =====================================================
+// -------------------- SUPPORT --------------------
 
 app.post(
   "/api/support",
@@ -1301,7 +1429,10 @@ app.post(
       );
 
       if (!message) {
-        return fail(res, "Message vide");
+        return fail(
+          res,
+          "Message vide"
+        );
       }
 
       const { data, error } = await supabase
@@ -1317,15 +1448,24 @@ app.post(
         .select("*")
         .single();
 
-      if (error) throw error;
+      if (error) {
+        throw error;
+      }
 
-      return ok(res, {
-        message: data,
-        status: "sent"
-      }, 201);
+      return ok(
+        res,
+        {
+          message: data,
+          status: "sent"
+        },
+        201
+      );
 
     } catch (error) {
-      console.error("Support:", error);
+      console.error(
+        "Support:",
+        error
+      );
 
       return fail(
         res,
@@ -1334,9 +1474,9 @@ app.post(
       );
     }
   }
-); // =====================================================
-// ADMIN — LISTE DES UTILISATEURS
-// =====================================================
+);
+
+// -------------------- ADMIN : UTILISATEURS --------------------
 
 app.get(
   "/api/admin/users",
@@ -1350,9 +1490,13 @@ app.get(
         .select("*")
         .limit(1000);
 
-      if (error) throw error;
+      if (error) {
+        throw error;
+      }
 
-      const users = (data || []).map(publicUser);
+      const users = (data || []).map(
+        publicUser
+      );
 
       return ok(res, {
         users,
@@ -1360,7 +1504,10 @@ app.get(
       });
 
     } catch (error) {
-      console.error("Admin utilisateurs:", error);
+      console.error(
+        "Admin utilisateurs:",
+        error
+      );
 
       return fail(
         res,
@@ -1371,9 +1518,7 @@ app.get(
   }
 );
 
-// =====================================================
-// ADMIN — MESSAGES
-// =====================================================
+// -------------------- ADMIN : MESSAGES --------------------
 
 app.get(
   "/api/admin/messages",
@@ -1405,22 +1550,20 @@ app.get(
         throw contactsResult.error;
       }
 
-      const supportMessages =
-        supportResult.data || [];
-
-      const contacts =
-        contactsResult.data || [];
-
       const messages = [
-        ...supportMessages.map(item => ({
-          ...item,
-          type: "support"
-        })),
+        ...(supportResult.data || []).map(
+          item => ({
+            ...item,
+            type: "support"
+          })
+        ),
 
-        ...contacts.map(item => ({
-          ...item,
-          type: "contact"
-        }))
+        ...(contactsResult.data || []).map(
+          item => ({
+            ...item,
+            type: "contact"
+          })
+        )
       ];
 
       return ok(res, {
@@ -1429,7 +1572,10 @@ app.get(
       });
 
     } catch (error) {
-      console.error("Admin messages:", error);
+      console.error(
+        "Admin messages:",
+        error
+      );
 
       return fail(
         res,
@@ -1440,9 +1586,7 @@ app.get(
   }
 );
 
-// =====================================================
-// PRÉSENCE — SANS MODIFIER LA BASE DE DONNÉES
-// =====================================================
+// -------------------- PRÉSENCE --------------------
 
 app.post(
   "/api/presence/heartbeat",
@@ -1456,12 +1600,7 @@ app.post(
   }
 );
 
-// =====================================================
-// AUDIO — ROUTES NON ACTIVÉES
-// =====================================================
-
-// Le frontend peut utiliser la reconnaissance vocale
-// native du navigateur en attendant une API audio.
+// -------------------- AUDIO --------------------
 
 app.post(
   "/api/audio/transcriptions",
@@ -1470,7 +1609,8 @@ app.post(
   (req, res) => {
     return res.status(501).json({
       success: false,
-      error: "La transcription audio par API n'est pas encore activée. Utilise la reconnaissance vocale du navigateur."
+      error:
+        "La transcription audio par API n'est pas activée. Utilise la reconnaissance vocale du navigateur."
     });
   }
 );
@@ -1482,43 +1622,46 @@ app.post(
   (req, res) => {
     return res.status(501).json({
       success: false,
-      error: "La génération audio par API n'est pas encore activée. Utilise la synthèse vocale du navigateur."
+      error:
+        "La génération audio par API n'est pas activée. Utilise la synthèse vocale du navigateur."
     });
   }
 );
 
-// =====================================================
-// ROUTE INCONNUE
-// =====================================================
+// -------------------- ROUTE INCONNUE --------------------
 
-app.use("/api", (req, res) => {
-  return fail(
-    res,
-    "Route API introuvable",
-    404
-  );
-});
-
-// =====================================================
-// GESTION DES ERREURS
-// =====================================================
-
-app.use((error, req, res, next) => {
-  console.error("Erreur serveur:", error);
-
-  if (res.headersSent) {
-    return next(error);
+app.use(
+  "/api",
+  (req, res) => {
+    return fail(
+      res,
+      "Route API introuvable",
+      404
+    );
   }
+);
 
-  return res.status(500).json({
-    success: false,
-    error: "Une erreur interne est survenue"
-  });
-});
+// -------------------- GESTION DES ERREURS --------------------
 
-// =====================================================
-// DÉMARRAGE DU SERVEUR
-// =====================================================
+app.use(
+  (error, req, res, next) => {
+    console.error(
+      "Erreur serveur:",
+      error
+    );
+
+    if (res.headersSent) {
+      return next(error);
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: "Une erreur interne est survenue"
+    });
+  }
+);
+
+// -------------------- DÉMARRAGE SERVEUR --------------------
 
 app.listen(PORT, () => {
   console.log("--------------------------------");

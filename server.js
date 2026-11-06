@@ -1,3 +1,12 @@
+/**
+ * TAYA IA — API V21.0.1
+ * Backend Express + Supabase + OpenRouter + Tavily
+ *
+ * Clé primaire de taya_v13_users : p
+ * Nom utilisateur : name
+ * Les anciennes données V12/V19 sont conservées.
+ */
+
 require("dotenv").config();
 
 const express = require("express");
@@ -10,9 +19,12 @@ const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const VERSION = "21.0.0";
-const OPENROUTER_URL = "https://openrouter.ai/api/v1";
+
+const PORT = Number(process.env.PORT || 3000);
+const VERSION = "21.0.1";
+
+const OPENROUTER_URL =
+  "https://openrouter.ai/api/v1/chat/completions";
 
 const {
   SUPABASE_URL,
@@ -21,139 +33,181 @@ const {
   JWT_SECRET,
   OPENROUTER_API_KEY,
   OPENROUTER_MODEL,
-  OPENROUTER_STT_MODEL,
-  OPENROUTER_TTS_MODEL,
-  TAVILY_API_KEY
+  OPENROUTER_VISION_MODEL,
+  OPENROUTER_PDF_MODEL,
+  TAVILY_API_KEY,
+  ALLOWED_ORIGIN
 } = process.env;
 
-const SUPABASE_KEY = SUPABASE_SECRET_KEY || SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_KEY =
+  SUPABASE_SECRET_KEY || SUPABASE_SERVICE_ROLE_KEY;
 
-const FRONTEND_ORIGINS = (
-  process.env.ALLOWED_ORIGIN || "https://marucesoldado752-ux.github.io"
-)
-  .split(",")
-  .map(origin => origin.trim().replace(/\/$/, ""))
-  .filter(Boolean);
+const supabase =
+  SUPABASE_URL && SUPABASE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_KEY, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false
+        }
+      })
+    : null;
 
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("Configuration Supabase manquante.");
-}
-
-if (!JWT_SECRET) {
-  console.error("JWT_SECRET manquant.");
-}
-
-if (!OPENROUTER_API_KEY) {
-  console.error("OPENROUTER_API_KEY manquante.");
-}
-
-const supabase = SUPABASE_URL && SUPABASE_KEY
-  ? createClient(SUPABASE_URL, SUPABASE_KEY, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false
-      }
-    })
-  : null;
+const ADMIN_PHONES = new Set([
+  "+224663401157",
+  "+224612768878"
+]);
 
 app.disable("x-powered-by");
 
 app.use(
   helmet({
-    crossOriginResourcePolicy: {
-      policy: "cross-origin"
-    }
+    crossOriginResourcePolicy: false
   })
 );
 
-app.use(cors({
-  origin(origin, callback) {
-    if (!origin) return callback(null, true);
+const allowedOrigins = (
+  ALLOWED_ORIGIN ||
+  "https://marucesoldado752-ux.github.io"
+)
+  .split(",")
+  .map(origin => origin.trim().replace(/\/+$/, ""))
+  .filter(Boolean);
 
-    const normalized = origin.replace(/\/$/, "");
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (
+        !origin ||
+        allowedOrigins.includes(origin.replace(/\/+$/, ""))
+      ) {
+        return callback(null, true);
+      }
 
-    if (FRONTEND_ORIGINS.includes(normalized)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error("Origine non autorisée"));
-  },
-  methods: ["GET", "POST", "PUT", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: false
-}));
+      return callback(
+        new Error("Origine non autorisée par CORS")
+      );
+    },
+    methods: [
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS"
+    ],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization"
+    ],
+    credentials: false
+  })
+);
 
 app.use(express.json({ limit: "25mb" }));
-app.use(express.urlencoded({
-  extended: true,
-  limit: "25mb"
-}));
 
-const apiLimiter = rateLimit({
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "25mb"
+  })
+);
+
+const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 100,
+  limit: 300,
   standardHeaders: "draft-7",
   legacyHeaders: false
 });
 
-app.use("/api/", apiLimiter);
-
-const audioLimiter = rateLimit({
+const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 20,
+  limit: 30,
   standardHeaders: "draft-7",
-  legacyHeaders: false,
-  message: {
-    success: false,
-    error: "Trop de requêtes audio. Réessaie plus tard."
-  }
+  legacyHeaders: false
 });
 
-/* ========================= OUTILS ========================= */
+app.use("/api/", generalLimiter);
 
-function success(res, data = {}) {
-  return res.json({
+// Réponses standard
+function ok(res, data = {}, status = 200) {
+  return res.status(status).json({
     success: true,
     ...data
   });
 }
 
-function failure(res, status, message) {
+function fail(res, message, status = 400) {
   return res.status(status).json({
     success: false,
     error: message
   });
 }
 
-function normalizePhone(phone) {
-  return String(phone || "").replace(/[^\d+]/g, "");
+// Normalisation du téléphone
+function normalizePhone(value) {
+  let phone = String(value || "")
+    .trim()
+    .replace(/[^\d+]/g, "");
+
+  if (phone && !phone.startsWith("+")) {
+    phone = "+" + phone;
+  }
+
+  return phone;
 }
 
-function isAdmin(phone) {
-  return [
-    "+224663401157",
-    "+224612768878"
-  ].includes(normalizePhone(phone));
+// Vérification administrateur
+function isAdmin(user) {
+  return ADMIN_PHONES.has(
+    normalizePhone(user && user.phone)
+  );
 }
 
+// Informations publiques du compte
 function publicUser(user) {
+  if (!user) return null;
+
   return {
-    id: user.id,
-    name: user.name || user.full_name || "Utilisateur",
-    phone: user.phone,
-    role: isAdmin(user.phone) ? "admin" : "user",
-    created_at: user.created_at
+    id: user.p,
+    p: user.p,
+    name: user.name || user.full_name || "",
+    full_name: user.name || user.full_name || "",
+    phone: user.phone || "",
+    email: user.email || "",
+    avatar_url: user.avatar_url || "",
+    role: isAdmin(user) ? "admin" : "user",
+    created_at: user.created_at || null,
+    last_seen_at: user.last_seen_at || null,
+    must_reset_password: !!user.must_reset_password
   };
 }
 
-function createToken(user) {
-  if (!JWT_SECRET) {
-    throw new Error("JWT_SECRET manquant");
+// Vérification des services
+function requireServices(req, res, next) {
+  if (!supabase) {
+    return fail(
+      res,
+      "Supabase n'est pas configuré sur le serveur",
+      503
+    );
   }
 
+  if (!JWT_SECRET) {
+    return fail(
+      res,
+      "JWT_SECRET n'est pas configuré",
+      503
+    );
+  }
+
+  next();
+}
+
+// Création du jeton de connexion
+function signToken(user) {
   return jwt.sign(
     {
-      id: user.id,
+      id: user.p,
       phone: user.phone
     },
     JWT_SECRET,
@@ -163,114 +217,95 @@ function createToken(user) {
   );
 }
 
-function generateRecoveryCode() {
-  return crypto.randomBytes(5).toString("hex").toUpperCase();
-}
-
+// Sécurité du code de récupération
 function hashRecoveryCode(code) {
   return crypto
     .createHash("sha256")
-    .update(String(code).toUpperCase())
+    .update(String(code))
     .digest("hex");
 }
 
-function safeEqualText(a, b) {
-  const left = Buffer.from(String(a || ""));
-  const right = Buffer.from(String(b || ""));
+function safeEqual(a, b) {
+  const aa = Buffer.from(String(a || ""));
+  const bb = Buffer.from(String(b || ""));
 
-  return left.length === right.length &&
-    crypto.timingSafeEqual(left, right);
+  return (
+    aa.length === bb.length &&
+    crypto.timingSafeEqual(aa, bb)
+  );
 }
 
-function requireServices(req, res, next) {
-  if (!supabase) {
-    return failure(res, 503, "Base de données non configurée.");
-  }
-
-  if (!JWT_SECRET) {
-    return failure(res, 503, "Authentification non configurée.");
-  }
-
-  next();
+// Mot de passe sécurisé
+async function makePasswordHash(password) {
+  return bcrypt.hash(String(password), 12);
 }
 
-app.use("/api/", (req, res, next) => {
-  if (req.path === "/status") {
-    return next();
+async function verifyPassword(user, password) {
+  const supplied = String(password || "");
+
+  if (user.password_hash) {
+    const stored = String(user.password_hash);
+
+    if (stored.startsWith("$2")) {
+      return bcrypt.compare(supplied, stored);
+    }
+
+    if (/^[a-f0-9]{64}$/i.test(stored)) {
+      return safeEqual(
+        crypto
+          .createHash("sha256")
+          .update(supplied)
+          .digest("hex"),
+        stored.toLowerCase()
+      );
+    }
+
+    return safeEqual(stored, supplied);
   }
 
-  return requireServices(req, res, next);
-});
+  if (
+    user.password !== undefined &&
+    user.password !== null
+  ) {
+    return safeEqual(user.password, supplied);
+  }
 
-/* ========================= MOT DE PASSE ========================= */
-
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString("hex");
-
-  const hash = crypto.scryptSync(
-    password,
-    salt,
-    64
-  ).toString("hex");
-
-  return `scrypt$${salt}$${hash}`;
+  return false;
 }
 
-async function verifyPassword(password, storedPassword) {
-  if (!storedPassword) return false;
+async function upgradePassword(user, password) {
+  const password_hash =
+    await makePasswordHash(password);
 
-  const stored = String(storedPassword);
-
-  if (/^\$2[aby]\$/.test(stored)) {
-    return bcrypt.compare(password, stored);
-  }
-
-  if (stored.startsWith("scrypt$")) {
-    const parts = stored.split("$");
-
-    if (parts.length !== 3) return false;
-
-    const original = Buffer.from(parts[2], "hex");
-
-    const calculated = crypto.scryptSync(
-      password,
-      parts[1],
-      original.length
-    );
-
-    return original.length === calculated.length &&
-      crypto.timingSafeEqual(original, calculated);
-  }
-
-  return safeEqualText(stored, password);
-}
-
-async function savePassword(userId, password) {
   const { error } = await supabase
     .from("taya_v13_users")
     .update({
-      password_hash: hashPassword(password),
+      password_hash,
       password: null,
-      must_reset_password: false,
       updated_at: new Date().toISOString()
     })
-    .eq("id", userId);
+    .eq("p", user.p);
 
-  if (error) throw error;
+  if (error) {
+    console.error(
+      "Password upgrade:",
+      error.message
+    );
+  }
 }
 
-/* ========================= AUTHENTIFICATION ========================= */
-
+// Vérification de la session
 async function authenticate(req, res, next) {
   try {
-    const header = req.headers.authorization || "";
+    const header =
+      req.headers.authorization || "";
 
     const token = header.startsWith("Bearer ")
       ? header.slice(7)
-      : null;
+      : "";
 
     if (!token) {
-      return failure(res, 401, "Connexion requise.");
+      return fail(res, "Connexion requise", 401);
     }
 
     const decoded = jwt.verify(token, JWT_SECRET);
@@ -278,488 +313,106 @@ async function authenticate(req, res, next) {
     const { data: user, error } = await supabase
       .from("taya_v13_users")
       .select("*")
-      .eq("id", decoded.id)
+      .eq("p", decoded.id)
       .maybeSingle();
 
     if (error || !user) {
-      return failure(res, 401, "Compte introuvable.");
+      return fail(res, "Session invalide", 401);
     }
 
     req.user = user;
     next();
 
   } catch (error) {
-    return failure(res, 401, "Session expirée. Reconnecte-toi.");
+    return fail(
+      res,
+      "Session invalide ou expirée",
+      401
+    );
   }
 }
 
+// Protection administrateur
 function requireAdmin(req, res, next) {
-  if (!isAdmin(req.user.phone)) {
-    return failure(res, 403, "Accès administrateur refusé.");
+  if (!isAdmin(req.user)) {
+    return fail(
+      res,
+      "Accès administrateur refusé",
+      403
+    );
   }
 
   next();
 }
 
-/* ========================= INTELLIGENCE ARTIFICIELLE ========================= */
-
-function openRouterHeaders() {
-  return {
-    Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-    "Content-Type": "application/json",
-    "HTTP-Referer": "https://marucesoldado752-ux.github.io",
-    "X-Title": "TAYA IA"
-  };
+// Nettoyage des textes
+function cleanText(value, max = 12000) {
+  return String(value || "")
+    .trim()
+    .slice(0, max);
 }
 
+// Extraction du texte renvoyé par l'IA
 function extractText(content) {
   if (typeof content === "string") {
     return content;
   }
 
-  if (!Array.isArray(content)) {
-    return "";
-  }
-
-  return content
-    .filter(part =>
-      part &&
-      part.type === "text" &&
-      typeof part.text === "string"
-    )
-    .map(part => part.text)
-    .join("\n");
-}
-
-function isAllowedDataUrl(
-  value,
-  prefixes,
-  maxChars = 20 * 1024 * 1024
-) {
-  return typeof value === "string" &&
-    value.length <= maxChars &&
-    prefixes.some(prefix => value.startsWith(prefix));
-}
-
-/* ========================= ROUTES PUBLIQUES ========================= */
-
-app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    application: "TAYA IA",
-    version: VERSION,
-    creator: "MARUCE SOLDADO",
-    country: "Guinée",
-    server: "online"
-  });
-});
-
-app.get("/api/status", (req, res) => {
-  return success(res, {
-    version: VERSION,
-    server: "online",
-    supabase: supabase ? "configured" : "not_configured",
-    ai: OPENROUTER_API_KEY ? "configured" : "not_configured",
-    web_search: TAVILY_API_KEY ? "configured" : "not_configured",
-    image_analysis: OPENROUTER_API_KEY
-      ? "available_if_model_supports_vision"
-      : "not_configured",
-    pdf_analysis: OPENROUTER_API_KEY
-      ? "available"
-      : "not_configured",
-    voice_transcription: OPENROUTER_API_KEY
-      ? "available"
-      : "not_configured",
-    voice_speech: OPENROUTER_API_KEY
-      ? "available"
-      : "not_configured"
-  });
-});
-
-/* ========================= AUTH ========================= */
-
-app.post("/api/auth/access", (req, res) => {
-  return failure(
-    res,
-    403,
-    "Cette méthode de connexion est désactivée. Utilise ton mot de passe."
-  );
-});
-
-app.post("/api/auth/legacy-reset", (req, res) => {
-  return failure(
-    res,
-    403,
-    "Réinitialisation non autorisée sans vérification du compte."
-  );
-});/* ========================= AUTHENTIFICATION ========================= */
-
-app.post("/api/auth/register", async (req, res) => {
-  try {
-    const name = String(req.body.name || "").trim().slice(0, 100);
-    const phone = normalizePhone(req.body.phone);
-    const password = String(req.body.password || "");
-
-    if (!name || !phone || password.length < 6 || password.length > 128) {
-      return failure(res, 400, "Nom, téléphone et mot de passe de 6 à 128 caractères obligatoires.");
-    }
-
-    const { data: existing, error: searchError } = await supabase
-      .from("taya_v13_users")
-      .select("id")
-      .eq("phone", phone)
-      .maybeSingle();
-
-    if (searchError) {
-      return failure(res, 500, "Erreur lors de la vérification du compte.");
-    }
-
-    if (existing) {
-      return failure(res, 409, "Ce numéro possède déjà un compte.");
-    }
-
-    const recoveryCode = generateRecoveryCode();
-
-    const { data: user, error } = await supabase
-      .from("taya_v13_users")
-      .insert({
-        name,
-        phone,
-        password_hash: hashPassword(password),
-        password: null,
-        recovery_code_hash: hashRecoveryCode(recoveryCode),
-        role: isAdmin(phone) ? "admin" : "user",
-        must_reset_password: false
-      })
-      .select("*")
-      .single();
-
-    if (error) {
-      console.error("Inscription Supabase:", error.message);
-      return failure(res, 500, "Impossible de créer le compte.");
-    }
-
-    return success(res, {
-      message: "Compte créé avec succès.",
-      token: createToken(user),
-      user: publicUser(user),
-      recovery_code: recoveryCode
-    });
-
-  } catch (error) {
-    console.error("Register:", error.message);
-    return failure(res, 500, "Erreur lors de l'inscription.");
-  }
-});
-
-
-app.post("/api/auth/login", async (req, res) => {
-  try {
-    const phone = normalizePhone(req.body.phone);
-    const password = String(req.body.password || "");
-
-    if (!phone || !password) {
-      return failure(res, 400, "Téléphone et mot de passe obligatoires.");
-    }
-
-    const { data: user, error } = await supabase
-      .from("taya_v13_users")
-      .select("*")
-      .eq("phone", phone)
-      .maybeSingle();
-
-    if (error || !user) {
-      return failure(res, 401, "Numéro ou mot de passe incorrect.");
-    }
-
-    const valid = await verifyPassword(
-      password,
-      user.password_hash || user.password
-    );
-
-    if (!valid) {
-      return failure(res, 401, "Numéro ou mot de passe incorrect.");
-    }
-
-    if (user.must_reset_password && isAdmin(user.phone)) {
-      const { error: updateError } = await supabase
-        .from("taya_v13_users")
-        .update({
-          must_reset_password: false,
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", user.id);
-
-      if (updateError) {
-        console.error("Admin update:", updateError.message);
+  if (Array.isArray(content)) {
+    return content.map(part => {
+      if (typeof part === "string") {
+        return part;
       }
 
-    } else if (user.must_reset_password) {
-      return failure(
-        res,
-        403,
-        "Ce compte doit être réactivé par une procédure de récupération vérifiée."
-      );
-    }
-
-    if (
-      !user.password_hash ||
-      !String(user.password_hash).startsWith("scrypt$")
-    ) {
-      await savePassword(user.id, password);
-    }
-
-    return success(res, {
-      message: "Connexion réussie.",
-      token: createToken(user),
-      user: publicUser(user)
-    });
-
-  } catch (error) {
-    console.error("Login:", error.message);
-    return failure(res, 500, "Erreur lors de la connexion.");
-  }
-});
-
-
-app.post("/api/auth/recover", async (req, res) => {
-  try {
-    const phone = normalizePhone(req.body.phone);
-    const recoveryCode = String(req.body.recovery_code || "");
-    const newPassword = String(req.body.new_password || "");
-
-    if (
-      !phone ||
-      !recoveryCode ||
-      newPassword.length < 6 ||
-      newPassword.length > 128
-    ) {
-      return failure(res, 400, "Informations de récupération invalides.");
-    }
-
-    const { data: user, error } = await supabase
-      .from("taya_v13_users")
-      .select("*")
-      .eq("phone", phone)
-      .maybeSingle();
-
-    if (
-      error ||
-      !user ||
-      !user.recovery_code_hash ||
-      !safeEqualText(
-        hashRecoveryCode(recoveryCode),
-        user.recovery_code_hash
-      )
-    ) {
-      return failure(res, 400, "Code de récupération incorrect.");
-    }
-
-    const newRecoveryCode = generateRecoveryCode();
-
-    const { error: updateError } = await supabase
-      .from("taya_v13_users")
-      .update({
-        password_hash: hashPassword(newPassword),
-        password: null,
-        recovery_code_hash: hashRecoveryCode(newRecoveryCode),
-        must_reset_password: false,
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", user.id);
-
-    if (updateError) {
-      return failure(res, 500, "Impossible de modifier le mot de passe.");
-    }
-
-    return success(res, {
-      message: "Mot de passe modifié.",
-      recovery_code: newRecoveryCode
-    });
-
-  } catch (error) {
-    console.error("Recover:", error.message);
-    return failure(res, 500, "Erreur de récupération.");
-  }
-});
-
-
-app.get("/api/auth/me", authenticate, (req, res) => {
-  return success(res, {
-    user: publicUser(req.user)
-  });
-});
-
-
-/* ========================= HISTORIQUE ========================= */
-
-app.get("/api/history", authenticate, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("taya_v12_messages")
-      .select("*")
-      .eq("user_id", req.user.id);
-
-    if (error) {
-      console.error("History:", error.message);
-      return failure(res, 500, "Impossible de charger l'historique.");
-    }
-
-    return success(res, {
-      messages: data || []
-    });
-
-  } catch (error) {
-    return failure(res, 500, "Erreur de chargement de l'historique.");
-  }
-});
-
-
-/* ========================= MÉMOIRE ========================= */
-
-app.get("/api/memory", authenticate, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("taya_v12_memories")
-      .select("*")
-      .eq("user_id", req.user.id)
-      .maybeSingle();
-
-    if (error) {
-      return failure(res, 500, "Impossible de charger la mémoire.");
-    }
-
-    return success(res, {
-      memory: data ? data.memory : ""
-    });
-
-  } catch (error) {
-    return failure(res, 500, "Erreur de mémoire.");
-  }
-});
-
-
-app.put("/api/memory", authenticate, async (req, res) => {
-  try {
-    const memory = String(req.body.memory || "").slice(0, 12000);
-
-    const { data: existing, error: searchError } = await supabase
-      .from("taya_v12_memories")
-      .select("user_id")
-      .eq("user_id", req.user.id)
-      .maybeSingle();
-
-    if (searchError) {
-      return failure(res, 500, "Erreur de mémoire.");
-    }
-
-    const result = existing
-      ? await supabase
-          .from("taya_v12_memories")
-          .update({
-            memory,
-            updated_at: new Date().toISOString()
-          })
-          .eq("user_id", req.user.id)
-      : await supabase
-          .from("taya_v12_memories")
-          .insert({
-            user_id: req.user.id,
-            memory,
-            updated_at: new Date().toISOString()
-          });
-
-    if (result.error) {
-      return failure(res, 500, "Impossible d'enregistrer la mémoire.");
-    }
-
-    return success(res, {
-      message: "Mémoire enregistrée."
-    });
-
-  } catch (error) {
-    return failure(res, 500, "Erreur d'enregistrement.");
-  }
-});
-
-
-/* ========================= RECHERCHE WEB ========================= */
-
-async function tavilySearch(query) {
-  if (!TAVILY_API_KEY) {
-    throw new Error("TAVILY_NOT_CONFIGURED");
+      return (
+        part && (part.text || part.content)
+      ) || "";
+    }).join("\n");
   }
 
-  const response = await fetch("https://api.tavily.com/search", {
+  return "";
+}// Connexion à OpenRouter
+async function openRouter(messages, model) {
+  if (!OPENROUTER_API_KEY) {
+    throw new Error("OPENROUTER_API_KEY n'est pas configuré");
+  }
+
+  const response = await fetch(OPENROUTER_URL, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${TAVILY_API_KEY}`,
-      "Content-Type": "application/json"
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://marucesoldado752-ux.github.io/",
+      "X-Title": "TAYA IA"
     },
     body: JSON.stringify({
-      query,
-      search_depth: "basic",
-      topic: "general",
-      max_results: 6,
-      include_answer: true,
-      include_raw_content: false
+      model: model || OPENROUTER_MODEL,
+      messages,
+      temperature: 0.7
     })
   });
 
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error("TAVILY_SEARCH_FAILED");
-  }
-
-  return {
-    answer: data.answer || "",
-    results: (data.results || []).slice(0, 6).map(item => ({
-      title: String(item.title || "Source"),
-      url: String(item.url || ""),
-      content: String(item.content || "").slice(0, 1800),
-      score: item.score
-    }))
-  };
-}
-
-
-app.post("/api/search", authenticate, async (req, res) => {
-  try {
-    const query = String(req.body.query || "").trim().slice(0, 500);
-
-    if (!query) {
-      return failure(res, 400, "Écris ce que tu veux rechercher.");
-    }
-
-    const search = await tavilySearch(query);
-
-    return success(res, search);
-
-  } catch (error) {
-    if (error.message === "TAVILY_NOT_CONFIGURED") {
-      return failure(
-        res,
-        503,
-        "Recherche Web non configurée. Ajoute TAVILY_API_KEY dans Render."
-      );
-    }
-
-    return failure(
-      res,
-      502,
-      "La recherche Internet est momentanément indisponible."
+    throw new Error(
+      data.error?.message || `Erreur IA (${response.status})`
     );
   }
-});/* ========================= SAUVEGARDE DES MESSAGES ========================= */
 
+  return extractText(
+    data.choices?.[0]?.message?.content
+  );
+}
+
+// Sauvegarde des messages
 async function saveChatMessage(userId, role, message) {
   const { error } = await supabase
     .from("taya_v12_messages")
     .insert({
       user_id: userId,
       role,
-      message: String(message).slice(0, 30000)
+      message
     });
 
   if (error) {
@@ -767,9 +420,7 @@ async function saveChatMessage(userId, role, message) {
   }
 }
 
-
-/* ========================= MÉMOIRE UTILISATEUR ========================= */
-
+// Lecture de la mémoire
 async function getUserMemory(userId) {
   const { data, error } = await supabase
     .from("taya_v12_memories")
@@ -777,185 +428,631 @@ async function getUserMemory(userId) {
     .eq("user_id", userId)
     .maybeSingle();
 
-  if (error) {
-    console.error("Lecture mémoire:", error.message);
-    return "";
+  if (error && error.code !== "PGRST116") {
+    throw error;
   }
 
   return data?.memory || "";
 }
 
+// Enregistrement de la mémoire
+async function saveUserMemory(userId, memory) {
+  const { data: existing, error: readError } =
+    await supabase
+      .from("taya_v12_memories")
+      .select("user_id")
+      .eq("user_id", userId)
+      .maybeSingle();
 
-/* ========================= APPEL À L'IA ========================= */
-
-async function askOpenRouter(messages, options = {}) {
-  if (!OPENROUTER_API_KEY) {
-    throw new Error("OPENROUTER_NOT_CONFIGURED");
+  if (readError && readError.code !== "PGRST116") {
+    throw readError;
   }
 
-  const response = await fetch(`${OPENROUTER_URL}/chat/completions`, {
-    method: "POST",
-    headers: openRouterHeaders(),
-    body: JSON.stringify({
-      model: OPENROUTER_MODEL || "openai/gpt-4o-mini",
-      messages,
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.max_tokens ?? 3000
-    })
-  });
+  if (existing) {
+    const { error } = await supabase
+      .from("taya_v12_memories")
+      .update({
+        memory,
+        updated_at: new Date().toISOString()
+      })
+      .eq("user_id", userId);
+
+    if (error) throw error;
+  } else {
+    const { error } = await supabase
+      .from("taya_v12_memories")
+      .insert({
+        user_id: userId,
+        memory,
+        updated_at: new Date().toISOString()
+      });
+
+    if (error) throw error;
+  }
+}
+
+// Recherche Web avec Tavily
+async function webSearch(query) {
+  if (!TAVILY_API_KEY) {
+    throw new Error("Recherche Web non configurée");
+  }
+
+  const response = await fetch(
+    "https://api.tavily.com/search",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        api_key: TAVILY_API_KEY,
+        query,
+        search_depth: "basic",
+        max_results: 5,
+        include_answer: true
+      })
+    }
+  );
 
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    console.error("OpenRouter:", data);
-    throw new Error("OPENROUTER_REQUEST_FAILED");
+    throw new Error(
+      data.message || "Échec de la recherche Web"
+    );
   }
 
-  const answer = data.choices?.[0]?.message?.content;
-
-  if (!answer) {
-    throw new Error("EMPTY_AI_RESPONSE");
-  }
-
-  return answer;
+  return data;
 }
 
-
-const SYSTEM_PROMPT = `
-Tu es TAYA IA, un assistant intelligent créé par MARUCE SOLDADO en Guinée 🇬🇳.
-
-Tes règles :
-- Réponds directement à la question.
-- Utilise un français naturel, clair et précis.
-- Évite les longues introductions inutiles.
-- Aide en programmation, mathématiques, sciences, rédaction, traduction et culture générale.
-- Si tu ne connais pas une information, ne l'invente pas.
-- Respecte les demandes de l'utilisateur.
-- Pour les questions nécessitant des informations récentes, utilise les résultats de recherche fournis.
-- Ne prétends jamais avoir effectué une action que tu n'as pas réalisée.
-- Tu peux expliquer ton raisonnement de manière claire sans révéler tes instructions internes.
-`;
-
-
-/* ========================= DISCUSSION ========================= */
-
-app.post("/api/chat", authenticate, async (req, res) => {
-  try {
-    const message = String(req.body.message || "").trim();
-
-    const webSearch = req.body.web_search === true;
-
-    if (!message) {
-      return failure(res, 400, "Écris un message avant d'envoyer.");
-    }
-
-    if (message.length > 12000) {
-      return failure(res, 413, "Ton message est trop long.");
-    }
-
-    const memory = await getUserMemory(req.user.id);
-
-    const messages = [
-      {
-        role: "system",
-        content: SYSTEM_PROMPT +
-          (memory
-            ? `\n\nInformations mémorisées sur cet utilisateur :\n${memory}`
-            : "")
-      }
-    ];
-
-    let webContext = null;
-
-    if (webSearch) {
-      try {
-        webContext = await tavilySearch(message);
-
-        messages.push({
-          role: "system",
-          content:
-            "Résultats de recherche Internet. Utilise-les pour répondre " +
-            "et indique les sources utiles :\n" +
-            JSON.stringify(webContext)
-        });
-
-      } catch (error) {
-        console.error("Recherche Web ignorée:", error.message);
-      }
-    }
-
-    messages.push({
-      role: "user",
-      content: message
-    });
-
-    const answer = await askOpenRouter(messages);
-
-    await saveChatMessage(req.user.id, "user", message);
-    await saveChatMessage(req.user.id, "assistant", answer);
-
-    return success(res, {
-      answer,
-      message: answer,
-      web_search: Boolean(webContext),
-      sources: webContext?.results || []
-    });
-
-  } catch (error) {
-    console.error("Chat:", error.message);
-
-    if (error.message === "OPENROUTER_NOT_CONFIGURED") {
-      return failure(res, 503, "Intelligence artificielle non configurée.");
-    }
-
-    return failure(res, 502, "TAYA IA n'a pas pu répondre. Réessaie.");
-  }
+// Page d'accueil et état du serveur
+app.get("/", (req, res) => {
+  return ok(res, {
+    name: "TAYA IA API",
+    version: VERSION,
+    status: "online"
+  });
 });
 
+app.get("/api/status", (req, res) => {
+  return ok(res, {
+    version: VERSION,
+    server: "online",
+    supabase: !!supabase,
+    ai: !!OPENROUTER_API_KEY,
+    web_search: !!TAVILY_API_KEY,
+    image_analysis: !!(
+      OPENROUTER_API_KEY &&
+      (OPENROUTER_VISION_MODEL || OPENROUTER_MODEL)
+    ),
+    pdf_analysis: !!(
+      OPENROUTER_API_KEY &&
+      (OPENROUTER_PDF_MODEL || OPENROUTER_MODEL)
+    )
+  });
+});
 
-/* ========================= ANALYSE D'IMAGES ========================= */
+// INSCRIPTION
+app.post(
+  "/api/auth/register",
+  authLimiter,
+  requireServices,
+  async (req, res) => {
+    try {
+      const name = cleanText(
+        req.body.name || req.body.full_name,
+        100
+      );
 
-app.post("/api/chat/image", authenticate, async (req, res) => {
-  try {
-    const image = req.body.image || req.body.data_url;
-    const question = String(
-      req.body.message || req.body.question || "Décris cette image."
-    ).slice(0, 4000);
+      const phone = normalizePhone(req.body.phone);
+      const password = String(req.body.password || "");
 
-    const allowedPrefixes = [
-      "data:image/jpeg;base64,",
-      "data:image/png;base64,",
-      "data:image/webp;base64,"
-    ];
+      if (!name || !phone || password.length < 6) {
+        return fail(
+          res,
+          "Nom, téléphone et mot de passe (6 caractères minimum) requis"
+        );
+      }
 
-    if (!isAllowedDataUrl(image, allowedPrefixes, 12 * 1024 * 1024)) {
-      return failure(
+      const { data: found, error: findError } =
+        await supabase
+          .from("taya_v13_users")
+          .select("p")
+          .eq("phone", phone)
+          .maybeSingle();
+
+      if (findError) throw findError;
+
+      if (found) {
+        return fail(
+          res,
+          "Ce numéro est déjà inscrit",
+          409
+        );
+      }
+
+      const password_hash =
+        await makePasswordHash(password);
+
+      const recoveryCode = crypto
+        .randomBytes(4)
+        .toString("hex")
+        .toUpperCase();
+
+      const { data: user, error } = await supabase
+        .from("taya_v13_users")
+        .insert({
+          name,
+          phone,
+          password_hash,
+          recovery_code_hash: hashRecoveryCode(recoveryCode),
+          role: ADMIN_PHONES.has(phone) ? "admin" : "user",
+          must_reset_password: false
+        })
+        .select("*")
+        .single();
+
+      if (error) throw error;
+
+      return ok(
         res,
-        400,
-        "Image invalide. Formats acceptés : JPG, PNG et WEBP."
+        {
+          token: signToken(user),
+          user: publicUser(user),
+          recovery_code: recoveryCode,
+          message: "Compte créé avec succès. Conservez votre code de récupération."
+        },
+        201
+      );
+
+    } catch (error) {
+      console.error("Register:", error.message);
+
+      return fail(
+        res,
+        error.message || "Impossible de créer le compte",
+        500
       );
     }
+  }
+);
 
-    const model = process.env.OPENROUTER_VISION_MODEL ||
-      OPENROUTER_MODEL ||
-      "openai/gpt-4o-mini";
+// CONNEXION
+app.post(
+  "/api/auth/login",
+  authLimiter,
+  requireServices,
+  async (req, res) => {
+    try {
+      const phone = normalizePhone(req.body.phone);
+      const password = String(req.body.password || "");
 
-    const response = await fetch(`${OPENROUTER_URL}/chat/completions`, {
-      method: "POST",
-      headers: openRouterHeaders(),
-      body: JSON.stringify({
-        model,
-        messages: [
+      if (!phone || !password) {
+        return fail(
+          res,
+          "Téléphone et mot de passe requis"
+        );
+      }
+
+      const { data: user, error } = await supabase
+        .from("taya_v13_users")
+        .select("*")
+        .eq("phone", phone)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (!user || !(await verifyPassword(user, password))) {
+        return fail(
+          res,
+          "Numéro ou mot de passe incorrect",
+          401
+        );
+      }
+
+      if (
+        !user.password_hash ||
+        !String(user.password_hash).startsWith("$2")
+      ) {
+        await upgradePassword(user, password);
+      }
+
+      return ok(res, {
+        token: signToken(user),
+        user: publicUser(user)
+      });
+
+    } catch (error) {
+      console.error("Login:", error.message);
+
+      return fail(
+        res,
+        "Erreur pendant la connexion",
+        500
+      );
+    }
+  }
+);
+
+// RÉCUPÉRATION DU COMPTE
+app.post(
+  "/api/auth/recover",
+  authLimiter,
+  requireServices,
+  async (req, res) => {
+    try {
+      const phone = normalizePhone(req.body.phone);
+
+      const code = cleanText(
+        req.body.recovery_code,
+        100
+      ).toUpperCase();
+
+      const newPassword = String(
+        req.body.new_password || ""
+      );
+
+      if (!phone || !code || newPassword.length < 6) {
+        return fail(
+          res,
+          "Téléphone, code et nouveau mot de passe requis"
+        );
+      }
+
+      const { data: user, error } = await supabase
+        .from("taya_v13_users")
+        .select("*")
+        .eq("phone", phone)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (
+        !user ||
+        !user.recovery_code_hash ||
+        !safeEqual(
+          user.recovery_code_hash,
+          hashRecoveryCode(code)
+        )
+      ) {
+        return fail(
+          res,
+          "Code de récupération incorrect",
+          401
+        );
+      }
+
+      const password_hash =
+        await makePasswordHash(newPassword);
+
+      const { error: updateError } = await supabase
+        .from("taya_v13_users")
+        .update({
+          password_hash,
+          password: null,
+          recovery_code_hash: null,
+          must_reset_password: false,
+          updated_at: new Date().toISOString()
+        })
+        .eq("p", user.p);
+
+      if (updateError) throw updateError;
+
+      return ok(res, {
+        message: "Mot de passe modifié. Vous pouvez vous connecter."
+      });
+
+    } catch (error) {
+      console.error("Recover:", error.message);
+
+      return fail(
+        res,
+        "Impossible de récupérer le compte",
+        500
+      );
+    }
+  }
+);
+
+// COMPTE CONNECTÉ
+app.get(
+  "/api/auth/me",
+  requireServices,
+  authenticate,
+  (req, res) => {
+    return ok(res, {
+      user: publicUser(req.user)
+    });
+  }
+);
+
+// HISTORIQUE
+app.get(
+  "/api/history",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const limit = Math.min(
+        Math.max(Number(req.query.limit) || 100, 1),
+        500
+      );
+
+      const { data, error } = await supabase
+        .from("taya_v12_messages")
+        .select("id,user_id,role,message")
+        .eq("user_id", req.user.p)
+        .limit(limit);
+
+      if (error) throw error;
+
+      return ok(res, {
+        messages: data || []
+      });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Impossible de charger l'historique",
+        500
+      );
+    }
+  }
+);
+
+// SUPPRESSION DE L'HISTORIQUE
+app.delete(
+  "/api/history",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const { error } = await supabase
+        .from("taya_v12_messages")
+        .delete()
+        .eq("user_id", req.user.p);
+
+      if (error) throw error;
+
+      return ok(res, {
+        message: "Historique supprimé"
+      });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Impossible de supprimer l'historique",
+        500
+      );
+    }
+  }
+);
+
+// MÉMOIRE — LECTURE
+app.get(
+  "/api/memory",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const memory = await getUserMemory(req.user.p);
+
+      return ok(res, { memory });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Impossible de lire la mémoire",
+        500
+      );
+    }
+  }
+);
+
+// MÉMOIRE — ENREGISTREMENT
+app.put(
+  "/api/memory",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      await saveUserMemory(
+        req.user.p,
+        cleanText(req.body.memory, 20000)
+      );
+
+      return ok(res, {
+        message: "Mémoire enregistrée"
+      });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Impossible d'enregistrer la mémoire",
+        500
+      );
+    }
+  }
+);
+
+// RECHERCHE WEB
+app.post(
+  "/api/search",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const query = cleanText(req.body.query, 1000);
+
+      if (!query) {
+        return fail(res, "Recherche manquante");
+      }
+
+      const result = await webSearch(query);
+
+      return ok(res, { result });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Recherche Web impossible",
+        502
+      );
+    }
+  }
+);
+
+// DISCUSSION AVEC TAYA IA
+app.post(
+  "/api/chat",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const message = cleanText(
+        req.body.message || req.body.prompt,
+        12000
+      );
+
+      if (!message) {
+        return fail(res, "Message vide");
+      }
+
+      const memory = await getUserMemory(
+        req.user.p
+      ).catch(() => "");
+
+      let searchContext = "";
+
+      if (
+        req.body.web_search === true &&
+        TAVILY_API_KEY
+      ) {
+        const search = await webSearch(message);
+
+        searchContext =
+          "\n\nRésultats de recherche Web :\n" +
+          JSON.stringify(search.results || [])
+            .slice(0, 12000);
+      }
+
+      const history = Array.isArray(req.body.history)
+        ? req.body.history
+            .slice(-12)
+            .map(item => ({
+              role:
+                item.role === "assistant"
+                  ? "assistant"
+                  : "user",
+              content: cleanText(
+                item.content || item.message,
+                4000
+              )
+            }))
+            .filter(item => item.content)
+        : [];
+
+      const system = [
+        "Tu es TAYA IA, un assistant intelligent, précis et rapide créé par Maruce Soldado.",
+        "Réponds dans la langue de l'utilisateur.",
+        "Va directement à la réponse, sans introduction inutile.",
+        "Sois honnête si tu ne connais pas une information. N'invente jamais de faits.",
+        memory
+          ? "Mémoire utile de l'utilisateur : " + memory
+          : "",
+        searchContext
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
+      const answer = await openRouter(
+        [
           {
             role: "system",
-            content: SYSTEM_PROMPT
+            content: system
           },
+          ...history,
+          {
+            role: "user",
+            content: message
+          }
+        ]
+      );
+
+      await saveChatMessage(
+        req.user.p,
+        "user",
+        message
+      );
+
+      await saveChatMessage(
+        req.user.p,
+        "assistant",
+        answer
+      );
+
+      return ok(res, {
+        answer,
+        response: answer
+      });
+
+    } catch (error) {
+      console.error("Chat:", error.message);
+
+      return fail(
+        res,
+        error.message || "L'IA n'a pas pu répondre",
+        502
+      );
+    }
+  }
+);// ======================================================
+// ANALYSE DES IMAGES
+// ======================================================
+
+app.post(
+  "/api/chat/image",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const image = String(
+        req.body.image || req.body.data_url || ""
+      );
+
+      const message = cleanText(
+        req.body.message || "Décris et analyse cette image.",
+        4000
+      );
+
+      if (
+        !/^data:image\/(png|jpe?g|webp|gif);base64,/i.test(image)
+      ) {
+        return fail(
+          res,
+          "Image invalide. Envoie une image PNG, JPG, WEBP ou GIF."
+        );
+      }
+
+      const model =
+        OPENROUTER_VISION_MODEL || OPENROUTER_MODEL;
+
+      if (!model) {
+        return fail(
+          res,
+          "Modèle d'analyse d'image non configuré",
+          503
+        );
+      }
+
+      const answer = await openRouter(
+        [
           {
             role: "user",
             content: [
               {
                 type: "text",
-                text: question
+                text: message
               },
               {
                 type: "image_url",
@@ -966,160 +1063,488 @@ app.post("/api/chat/image", authenticate, async (req, res) => {
             ]
           }
         ],
-        max_tokens: 2500
-      })
-    });
+        model
+      );
 
-    const data = await response.json().catch(() => ({}));
+      return ok(res, {
+        answer,
+        response: answer
+      });
 
-    if (!response.ok) {
-      console.error("Vision:", data);
-      return failure(res, 502, "Impossible d'analyser cette image.");
-    }
+    } catch (error) {
+      console.error("Image:", error.message);
 
-    const answer = data.choices?.[0]?.message?.content;
-
-    if (!answer) {
-      return failure(res, 502, "Aucune réponse reçue pour cette image.");
-    }
-
-    await saveChatMessage(
-      req.user.id,
-      "user",
-      `[Image] ${question}`
-    );
-
-    await saveChatMessage(req.user.id, "assistant", answer);
-
-    return success(res, {
-      answer,
-      message: answer
-    });
-
-  } catch (error) {
-    console.error("Image:", error.message);
-    return failure(res, 500, "Erreur pendant l'analyse de l'image.");
-  }
-});
-
-
-/* ========================= LECTURE DES PDF ========================= */
-
-app.post("/api/chat/pdf", authenticate, async (req, res) => {
-  try {
-    const pdf = req.body.file || req.body.pdf || req.body.data_url;
-
-    const question = String(
-      req.body.message || req.body.question ||
-      "Résume et explique ce document."
-    ).slice(0, 4000);
-
-    if (typeof pdf !== "string") {
-      return failure(res, 400, "Document PDF manquant.");
-    }
-
-    const base64 = pdf.includes(",")
-      ? pdf.substring(pdf.indexOf(",") + 1)
-      : pdf;
-
-    if (
-      base64.length > 14 * 1024 * 1024 ||
-      !/^[A-Za-z0-9+/=\s]+$/.test(base64)
-    ) {
-      return failure(res, 413, "PDF invalide ou trop volumineux.");
-    }
-
-    const buffer = Buffer.from(base64, "base64");
-
-    if (
-      buffer.length < 5 ||
-      buffer.subarray(0, 5).toString() !== "%PDF-"
-    ) {
-      return failure(res, 400, "Le fichier fourni n'est pas un PDF valide.");
-    }
-
-    const pdfParse = require("pdf-parse");
-
-    const parsed = await pdfParse(buffer);
-
-    const extractedText = String(parsed.text || "")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    if (!extractedText) {
-      return failure(
+      return fail(
         res,
-        422,
-        "Aucun texte lisible trouvé dans ce PDF. Le document est peut-être scanné."
+        error.message || "Analyse de l'image impossible",
+        502
       );
     }
-
-    const documentText = extractedText.slice(0, 45000);
-
-    const answer = await askOpenRouter([
-      {
-        role: "system",
-        content: SYSTEM_PROMPT +
-          "\nTu dois analyser le document fourni. " +
-          "Base tes réponses sur son contenu et signale les limites."
-      },
-      {
-        role: "user",
-        content:
-          `Question : ${question}\n\n` +
-          `Contenu du document :\n${documentText}`
-      }
-    ], {
-      max_tokens: 3500
-    });
-
-    await saveChatMessage(
-      req.user.id,
-      "user",
-      `[PDF] ${question}`
-    );
-
-    await saveChatMessage(req.user.id, "assistant", answer);
-
-    return success(res, {
-      answer,
-      message: answer,
-      pages: parsed.numpages || null
-    });
-
-  } catch (error) {
-    console.error("PDF:", error.message);
-
-    if (error.code === "MODULE_NOT_FOUND") {
-      return failure(res, 503, "Le module PDF n'est pas installé.");
-    }
-
-    return failure(res, 500, "Impossible de lire ce document PDF.");
   }
+);
+
+
+// ======================================================
+// LECTURE DES PDF
+// ======================================================
+
+app.post(
+  "/api/chat/pdf",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const file = String(
+        req.body.file || req.body.data || ""
+      );
+
+      const question = cleanText(
+        req.body.message || "Résume et explique ce document.",
+        4000
+      );
+
+      const base64 = file.replace(
+        /^data:application\/pdf;base64,/i,
+        ""
+      );
+
+      if (
+        !base64 ||
+        base64.length > 18 * 1024 * 1024
+      ) {
+        return fail(
+          res,
+          "PDF manquant ou trop volumineux."
+        );
+      }
+
+      const buffer = Buffer.from(base64, "base64");
+
+      if (buffer.subarray(0, 5).toString() !== "%PDF-") {
+        return fail(res, "Fichier PDF invalide.");
+      }
+
+      let pdfParse;
+
+      try {
+        pdfParse = require("pdf-parse");
+      } catch (_) {
+        return fail(
+          res,
+          "Le module pdf-parse manque. Ajoute pdf-parse aux dépendances.",
+          503
+        );
+      }
+
+      const parsed = await pdfParse(buffer);
+
+      const documentText = cleanText(
+        parsed.text,
+        50000
+      );
+
+      if (!documentText) {
+        return fail(
+          res,
+          "Aucun texte lisible trouvé dans ce PDF."
+        );
+      }
+
+      const answer = await openRouter(
+        [
+          {
+            role: "system",
+            content:
+              "Tu es TAYA IA. Analyse le contenu du document et réponds précisément. N'invente rien."
+          },
+          {
+            role: "user",
+            content:
+              `Question : ${question}\n\n` +
+              `Contenu du PDF :\n${documentText}`
+          }
+        ],
+        OPENROUTER_PDF_MODEL || OPENROUTER_MODEL
+      );
+
+      return ok(res, {
+        answer,
+        response: answer,
+        pages: parsed.numpages || null
+      });
+
+    } catch (error) {
+      console.error("PDF:", error.message);
+
+      return fail(
+        res,
+        error.message || "Lecture du PDF impossible",
+        502
+      );
+    }
+  }
+);
+
+
+// ======================================================
+// MESSAGES ENVOYÉS À MARUCE
+// ======================================================
+
+app.post(
+  "/api/contacts",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const message = cleanText(
+        req.body.message,
+        5000
+      );
+
+      if (!message) {
+        return fail(res, "Message vide");
+      }
+
+      const { data, error } = await supabase
+        .from("taya_v12_contacts")
+        .insert({
+          user_id: req.user.p,
+          message
+        })
+        .select("*")
+        .single();
+
+      if (error) throw error;
+
+      return ok(
+        res,
+        {
+          contact: data,
+          message: "Message envoyé"
+        },
+        201
+      );
+
+    } catch (error) {
+      console.error("Contact:", error.message);
+
+      return fail(
+        res,
+        error.message || "Envoi impossible",
+        500
+      );
+    }
+  }
+);
+
+
+app.get(
+  "/api/contacts",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from("taya_v12_contacts")
+        .select("*")
+        .eq("user_id", req.user.p);
+
+      if (error) throw error;
+
+      return ok(res, {
+        contacts: data || []
+      });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Impossible de charger les messages",
+        500
+      );
+    }
+  }
+);
+
+
+// ======================================================
+// MESSAGES DE SUPPORT
+// ======================================================
+
+app.post(
+  "/api/support/messages",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const message = cleanText(
+        req.body.message,
+        5000
+      );
+
+      if (!message) {
+        return fail(res, "Message vide");
+      }
+
+      const { data, error } = await supabase
+        .from("taya_v19_support_messages")
+        .insert({
+          user_id: req.user.p,
+          sender_id: req.user.p,
+          sender_role: isAdmin(req.user)
+            ? "admin"
+            : "user",
+          message
+        })
+        .select("*")
+        .single();
+
+      if (error) throw error;
+
+      return ok(
+        res,
+        {
+          message: data
+        },
+        201
+      );
+
+    } catch (error) {
+      console.error("Support:", error.message);
+
+      return fail(
+        res,
+        error.message || "Envoi du message impossible",
+        500
+      );
+    }
+  }
+);
+
+
+app.get(
+  "/api/support/messages",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      let query = supabase
+        .from("taya_v19_support_messages")
+        .select("*");
+
+      if (!isAdmin(req.user)) {
+        query = query.eq("user_id", req.user.p);
+      }
+
+      const { data, error } = await query;
+
+      if (error) throw error;
+
+      return ok(res, {
+        messages: data || []
+      });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Impossible de charger les messages",
+        500
+      );
+    }
+  }
+);
+
+
+// ======================================================
+// ADMINISTRATION — UTILISATEURS INSCRITS
+// ======================================================
+
+app.get(
+  "/api/admin/users",
+  requireServices,
+  authenticate,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from("taya_v13_users")
+        .select(
+          "p,name,phone,email,role,created_at,last_seen_at"
+        )
+        .order("created_at", {
+          ascending: false
+        })
+        .limit(1000);
+
+      if (error) throw error;
+
+      return ok(res, {
+        users: (data || []).map(publicUser)
+      });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Impossible de charger les inscrits",
+        500
+      );
+    }
+  }
+);
+
+
+// ======================================================
+// ADMINISTRATION — MESSAGES
+// ======================================================
+
+app.get(
+  "/api/admin/messages",
+  requireServices,
+  authenticate,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const [support, contacts] = await Promise.all([
+        supabase
+          .from("taya_v19_support_messages")
+          .select("*")
+          .limit(1000),
+
+        supabase
+          .from("taya_v12_contacts")
+          .select("*")
+          .limit(1000)
+      ]);
+
+      if (support.error) throw support.error;
+      if (contacts.error) throw contacts.error;
+
+      return ok(res, {
+        support_messages: support.data || [],
+        contact_messages: contacts.data || []
+      });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Impossible de charger les messages admin",
+        500
+      );
+    }
+  }
+);
+
+
+// ======================================================
+// ADMINISTRATION — PRÉSENCE
+// ======================================================
+
+app.get(
+  "/api/admin/presence",
+  requireServices,
+  authenticate,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from("taya_v13_users")
+        .select("p,name,phone,last_seen_at")
+        .order("last_seen_at", {
+          ascending: false
+        })
+        .limit(500);
+
+      if (error) throw error;
+
+      return ok(res, {
+        users: data || []
+      });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Impossible de charger les présences",
+        500
+      );
+    }
+  }
+);
+
+
+// ======================================================
+// MISE À JOUR DE LA PRÉSENCE
+// ======================================================
+
+app.post(
+  "/api/presence/heartbeat",
+  requireServices,
+  authenticate,
+  async (req, res) => {
+    try {
+      const { error } = await supabase
+        .from("taya_v13_users")
+        .update({
+          last_seen_at: new Date().toISOString()
+        })
+        .eq("p", req.user.p);
+
+      if (error) throw error;
+
+      return ok(res, {
+        online: true
+      });
+
+    } catch (error) {
+      return fail(
+        res,
+        error.message || "Mise à jour de présence impossible",
+        500
+      );
+    }
+  }
+);
+
+
+// ======================================================
+// ROUTE INCONNUE
+// ======================================================
+
+app.use((req, res) => {
+  return fail(
+    res,
+    "Route introuvable",
+    404
+  );
 });
 
 
-/* ========================= PRÉSENCE UTILISATEUR ========================= */
+// ======================================================
+// GESTION GÉNÉRALE DES ERREURS
+// ======================================================
 
-app.post("/api/presence/heartbeat", authenticate, async (req, res) => {
-  try {
-    const { error } = await supabase
-      .from("taya_v13_users")
-      .update({
-        last_seen_at: new Date().toISOString()
-      })
-      .eq("id", req.user.id);
+app.use((error, req, res, next) => {
+  console.error(
+    "Erreur serveur:",
+    error && error.stack || error
+  );
 
-    if (error) {
-      console.error("Presence:", error.message);
-      return failure(res, 500, "Présence non enregistrée.");
-    }
-
-    return success(res, {
-      online: true
-    });
-
-  } catch (error) {
-    return failure(res, 500, "Erreur de présence.");
+  if (res.headersSent) {
+    return next(error);
   }
+
+  return fail(
+    res,
+    error.message || "Erreur interne du serveur",
+    500
+  );
+});
+
+
+// ======================================================
+// DÉMARRAGE DU SERVEUR — INDISPENSABLE POUR RENDER
+// ======================================================
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `TAYA IA API V${VERSION} démarrée sur le port ${PORT}`
+  );
 });

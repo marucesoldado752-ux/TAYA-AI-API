@@ -1,3 +1,4 @@
+// TAYA IA V22.0.2 — SERVER.JS
 "use strict";
 
 require("dotenv").config();
@@ -13,7 +14,7 @@ const { promisify } = require("util");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-const VERSION = "22.0.1";
+const VERSION = "22.0.2";
 const PORT = process.env.PORT || 3000;
 
 const {
@@ -34,12 +35,16 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !JWT_SECRET) {
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
+const supabase = createClient(
+  SUPABASE_URL,
+  SUPABASE_KEY,
+  {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false
+    }
   }
-});
+);
 
 const scryptAsync = promisify(crypto.scrypt);
 
@@ -66,7 +71,6 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: "15mb" }));
-
 app.use(express.urlencoded({
   extended: true,
   limit: "15mb"
@@ -110,7 +114,6 @@ function normalizePhone(phone) {
 function phoneVariants(phone) {
   const normalized = normalizePhone(phone);
   const digits = normalized.replace(/\D/g, "");
-
   const variants = new Set([normalized, digits]);
 
   if (digits.startsWith("224") && digits.length > 3) {
@@ -143,7 +146,7 @@ function publicUser(user) {
 }
 
 // ==========================================
-// AUTHENTIFICATION ET MOTS DE PASSE
+// AUTHENTIFICATION
 // ==========================================
 
 function createToken(user) {
@@ -153,9 +156,7 @@ function createToken(user) {
       phone: user.phone
     },
     JWT_SECRET,
-    {
-      expiresIn: "30d"
-    }
+    { expiresIn: "30d" }
   );
 }
 
@@ -183,6 +184,11 @@ function safeHexBuffer(value) {
   return Buffer.from(value, "hex");
 }
 
+// ==========================================
+// CORRECTION IMPORTANTE DU MOT DE PASSE
+// Accepte scrypt:salt:hash ET scrypt$salt$hash
+// ==========================================
+
 async function verifyPassword(password, stored) {
   if (
     stored === null ||
@@ -195,11 +201,18 @@ async function verifyPassword(password, stored) {
   const candidate = String(password);
   const value = String(stored);
 
-  // Nouveau format SCRYPT
-  if (value.startsWith("scrypt:")) {
-    const parts = value.split(":");
+  if (
+    value.startsWith("scrypt:") ||
+    value.startsWith("scrypt$")
+  ) {
+    const separator = value[6];
+    const parts = value.split(separator);
 
-    if (parts.length !== 3 || !parts[1]) {
+    if (
+      parts.length !== 3 ||
+      parts[0] !== "scrypt" ||
+      !parts[1]
+    ) {
       return false;
     }
 
@@ -249,7 +262,7 @@ async function verifyPassword(password, stored) {
       crypto.timingSafeEqual(original, submitted);
   }
 
-  // Très anciennes versions : texte directement enregistré
+  // Très ancien format
   const a = Buffer.from(candidate, "utf8");
   const b = Buffer.from(value, "utf8");
 
@@ -298,7 +311,7 @@ async function findUsersByPhone(phone) {
 }
 
 // ==========================================
-// MIDDLEWARE AUTHENTIFICATION
+// AUTHENTIFICATION DES REQUÊTES
 // ==========================================
 
 async function authenticate(req, res, next) {
@@ -368,11 +381,14 @@ async function openRouter(messages, options = {}) {
       headers: {
         Authorization: `Bearer ${OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://marucesoldado752-ux.github.io",
+        "HTTP-Referer":
+          "https://marucesoldado752-ux.github.io",
         "X-Title": "TAYA IA"
       },
       body: JSON.stringify({
-        model: OPENROUTER_MODEL || "openai/gpt-4o-mini",
+        model:
+          OPENROUTER_MODEL ||
+          "openai/gpt-4o-mini",
         messages,
         max_tokens: options.max_tokens || 4000,
         temperature: 0.7
@@ -396,7 +412,9 @@ async function openRouter(messages, options = {}) {
   }
 
   if (Array.isArray(content)) {
-    return content.map(part => part.text || "").join("\n");
+    return content
+      .map(part => part.text || "")
+      .join("\n");
   }
 
   return "Je n'ai pas pu générer de réponse.";
@@ -432,12 +450,14 @@ app.get("/health", async (req, res) => {
   return success(res, {
     server: "online",
     supabase: database,
-    ai: OPENROUTER_API_KEY ? "configured" : "missing",
-    web_search: TAVILY_API_KEY ? "configured" : "missing"
+    ai: OPENROUTER_API_KEY
+      ? "configured"
+      : "missing",
+    web_search: TAVILY_API_KEY
+      ? "configured"
+      : "missing"
   });
-});
-
-// ==========================================
+});// ==========================================
 // INSCRIPTION
 // ==========================================
 
@@ -446,11 +466,7 @@ async function registerHandler(req, res) {
     const { name, phone, password, email } = req.body || {};
 
     if (!name || !phone || !password) {
-      return failure(
-        res,
-        400,
-        "Informations obligatoires manquantes"
-      );
+      return failure(res, 400, "Informations obligatoires manquantes");
     }
 
     if (String(password).length < 6) {
@@ -466,11 +482,7 @@ async function registerHandler(req, res) {
     const existing = await findUsersByPhone(normalizedPhone);
 
     if (existing.length) {
-      return failure(
-        res,
-        409,
-        "Ce numéro possède déjà un compte"
-      );
+      return failure(res, 409, "Ce numéro possède déjà un compte");
     }
 
     const passwordHash = await hashPassword(password);
@@ -499,12 +511,7 @@ async function registerHandler(req, res) {
 
   } catch (error) {
     console.error("REGISTER:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Impossible de créer le compte"
-    );
+    return failure(res, 500, "Impossible de créer le compte");
   }
 }
 
@@ -517,36 +524,22 @@ async function loginHandler(req, res) {
     const { phone, password } = req.body || {};
 
     if (!phone || !password) {
-      return failure(
-        res,
-        400,
-        "Numéro et mot de passe obligatoires"
-      );
+      return failure(res, 400, "Numéro et mot de passe obligatoires");
     }
 
-    // Recherche de toutes les variantes du numéro
     const candidates = await findUsersByPhone(phone);
 
     if (!candidates.length) {
-      return failure(
-        res,
-        401,
-        "Numéro ou mot de passe incorrect"
-      );
+      return failure(res, 401, "Numéro ou mot de passe incorrect");
     }
 
-    // Vérification de tous les comptes correspondants
     const matching = [];
 
     for (const candidate of candidates) {
       const storedValues = [
         candidate.password_hash,
         candidate.password
-      ].filter(v =>
-        v !== null &&
-        v !== undefined &&
-        v !== ""
-      );
+      ].filter(v => v !== null && v !== undefined && v !== "");
 
       let valid = false;
 
@@ -557,44 +550,33 @@ async function loginHandler(req, res) {
         }
       }
 
-      if (valid) {
-        matching.push(candidate);
-      }
+      if (valid) matching.push(candidate);
     }
 
     if (!matching.length) {
-      return failure(
-        res,
-        401,
-        "Numéro ou mot de passe incorrect"
-      );
+      return failure(res, 401, "Numéro ou mot de passe incorrect");
     }
 
-    // Priorité au compte administrateur déjà enregistré
     matching.sort((a, b) =>
-      Number(b.role === "admin") -
-      Number(a.role === "admin")
+      Number(b.role === "admin") - Number(a.role === "admin")
     );
 
     const user = matching[0];
-
-    // Migration automatique du mot de passe
     const newHash = await hashPassword(String(password));
     const now = new Date().toISOString();
 
-    const { data: updatedUser, error: updateError } =
-      await supabase
-        .from("taya_v13_users")
-        .update({
-          password_hash: newHash,
-          password: null,
-          must_reset_password: false,
-          last_seen_at: now,
-          updated_at: now
-        })
-        .eq("id", user.id)
-        .select("*")
-        .single();
+    const { data: updatedUser, error: updateError } = await supabase
+      .from("taya_v13_users")
+      .update({
+        password_hash: newHash,
+        password: null,
+        must_reset_password: false,
+        last_seen_at: now,
+        updated_at: now
+      })
+      .eq("id", user.id)
+      .select("*")
+      .single();
 
     if (updateError) throw updateError;
 
@@ -606,34 +588,17 @@ async function loginHandler(req, res) {
 
   } catch (error) {
     console.error("LOGIN:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Erreur pendant la connexion"
-    );
+    return failure(res, 500, "Erreur pendant la connexion");
   }
 }
 
-// Compatibilité avec les anciennes routes V21
-app.post(
-  ["/api/register", "/api/auth/register"],
-  registerHandler
-);
-
-app.post(
-  ["/api/login", "/api/auth/login"],
-  loginHandler
-);
+app.post(["/api/register", "/api/auth/register"], registerHandler);
+app.post(["/api/login", "/api/auth/login"], loginHandler);
 
 app.get(
   ["/api/me", "/api/auth/me"],
   authenticate,
-  (req, res) => {
-    return success(res, {
-      user: publicUser(req.user)
-    });
-  }
+  (req, res) => success(res, { user: publicUser(req.user) })
 );
 
 // ==========================================
@@ -641,9 +606,7 @@ app.get(
 // ==========================================
 
 app.get("/api/profile", authenticate, (req, res) => {
-  return success(res, {
-    user: publicUser(req.user)
-  });
+  return success(res, { user: publicUser(req.user) });
 });
 
 app.put("/api/profile/name", authenticate, async (req, res) => {
@@ -666,18 +629,11 @@ app.put("/api/profile/name", authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    return success(res, {
-      user: publicUser(data)
-    });
+    return success(res, { user: publicUser(data) });
 
   } catch (error) {
     console.error("PROFILE:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Impossible de modifier le profil"
-    );
+    return failure(res, 500, "Impossible de modifier le profil");
   }
 });
 
@@ -704,22 +660,15 @@ app.post("/api/recover", async (req, res) => {
       if (!item.recovery_code_hash) return false;
 
       const a = Buffer.from(submittedHash, "hex");
-      const b = Buffer.from(
-        String(item.recovery_code_hash),
-        "hex"
-      );
+      const b = Buffer.from(String(item.recovery_code_hash), "hex");
 
-      return a.length === b.length &&
+      return b.length === a.length &&
         a.length > 0 &&
         crypto.timingSafeEqual(a, b);
     });
 
     if (!user) {
-      return failure(
-        res,
-        400,
-        "Code de récupération incorrect"
-      );
+      return failure(res, 400, "Code de récupération incorrect");
     }
 
     const newHash = await hashPassword(String(newPassword));
@@ -743,18 +692,12 @@ app.post("/api/recover", async (req, res) => {
 
   } catch (error) {
     console.error("RECOVER:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Erreur de récupération"
-    );
+    return failure(res, 500, "Erreur de récupération");
   }
 });
 
 // ==========================================
 // HISTORIQUE
-// TABLE : taya_v12_messages
 // ==========================================
 
 app.get("/api/history", authenticate, async (req, res) => {
@@ -775,12 +718,7 @@ app.get("/api/history", authenticate, async (req, res) => {
 
   } catch (error) {
     console.error("HISTORY:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Impossible de charger l'historique"
-    );
+    return failure(res, 500, "Impossible de charger l'historique");
   }
 });
 
@@ -798,7 +736,6 @@ async function saveMessage(userId, role, message) {
 
 // ==========================================
 // MÉMOIRE
-// TABLE : taya_v12_memories
 // ==========================================
 
 app.get("/api/memory", authenticate, async (req, res) => {
@@ -817,29 +754,21 @@ app.get("/api/memory", authenticate, async (req, res) => {
 
   } catch (error) {
     console.error("MEMORY GET:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Impossible de charger la mémoire"
-    );
+    return failure(res, 500, "Impossible de charger la mémoire");
   }
 });
 
 app.put("/api/memory", authenticate, async (req, res) => {
   try {
     const memory = String(
-      req.body?.memory ??
-      req.body?.content ??
-      ""
+      req.body?.memory ?? req.body?.content ?? ""
     ).slice(0, 20000);
 
-    const { data: existing, error: searchError } =
-      await supabase
-        .from("taya_v12_memories")
-        .select("user_id")
-        .eq("user_id", req.user.id)
-        .maybeSingle();
+    const { data: existing, error: searchError } = await supabase
+      .from("taya_v12_memories")
+      .select("user_id")
+      .eq("user_id", req.user.id)
+      .maybeSingle();
 
     if (searchError) throw searchError;
 
@@ -853,7 +782,6 @@ app.put("/api/memory", authenticate, async (req, res) => {
           updated_at: new Date().toISOString()
         })
         .eq("user_id", req.user.id);
-
     } else {
       result = await supabase
         .from("taya_v12_memories")
@@ -872,12 +800,7 @@ app.put("/api/memory", authenticate, async (req, res) => {
 
   } catch (error) {
     console.error("MEMORY PUT:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Impossible d'enregistrer la mémoire"
-    );
+    return failure(res, 500, "Impossible d'enregistrer la mémoire");
   }
 });
 
@@ -903,12 +826,10 @@ async function getRecentHistory(userId) {
 
   if (error) throw error;
 
-  return (data || [])
-    .reverse()
-    .map(item => ({
-      role: item.role,
-      content: item.message
-    }));
+  return (data || []).reverse().map(item => ({
+    role: item.role,
+    content: item.message
+  }));
 }
 
 // ==========================================
@@ -976,13 +897,12 @@ app.post("/api/chat", authenticate, async (req, res) => {
       getRecentHistory(req.user.id)
     ]);
 
-    const searchContext =
-      req.body.web_search === true
-        ? await webSearch(userMessage)
-        : "";
+    const searchContext = req.body.web_search === true
+      ? await webSearch(userMessage)
+      : "";
 
     const systemPrompt = `
-Tu es TAYA IA V22.0.1 🤖🇬🇳.
+Tu es TAYA IA V22.0.2 🤖🇬🇳.
 
 Tu as été créée par MARUCE SOLDADO en Guinée.
 
@@ -1015,17 +935,8 @@ ${searchContext}
       }
     ]);
 
-    await saveMessage(
-      req.user.id,
-      "user",
-      userMessage
-    );
-
-    await saveMessage(
-      req.user.id,
-      "assistant",
-      answer
-    );
+    await saveMessage(req.user.id, "user", userMessage);
+    await saveMessage(req.user.id, "assistant", answer);
 
     return success(res, {
       answer,
@@ -1035,12 +946,7 @@ ${searchContext}
 
   } catch (error) {
     console.error("CHAT:", error.message);
-
-    return failure(
-      res,
-      500,
-      "TAYA IA n'a pas pu répondre"
-    );
+    return failure(res, 500, "TAYA IA n'a pas pu répondre");
   }
 });
 
@@ -1050,9 +956,7 @@ ${searchContext}
 
 app.post("/api/chat/image", authenticate, async (req, res) => {
   try {
-    const image =
-      req.body?.image ||
-      req.body?.image_base64;
+    const image = req.body?.image || req.body?.image_base64;
 
     if (!image) {
       return failure(res, 400, "Image manquante");
@@ -1108,12 +1012,7 @@ app.post("/api/chat/image", authenticate, async (req, res) => {
 
   } catch (error) {
     console.error("IMAGE:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Impossible d'analyser cette image"
-    );
+    return failure(res, 500, "Impossible d'analyser cette image");
   }
 });
 
@@ -1123,9 +1022,7 @@ app.post("/api/chat/image", authenticate, async (req, res) => {
 
 app.post("/api/chat/pdf", authenticate, async (req, res) => {
   try {
-    const file =
-      req.body?.file ||
-      req.body?.pdf_base64;
+    const file = req.body?.file || req.body?.pdf_base64;
 
     if (!file) {
       return failure(res, 400, "Document PDF manquant");
@@ -1137,30 +1034,18 @@ app.post("/api/chat/pdf", authenticate, async (req, res) => {
 
     const buffer = Buffer.from(base64, "base64");
 
-    if (
-      !buffer.length ||
-      buffer.length > 10 * 1024 * 1024
-    ) {
-      return failure(
-        res,
-        400,
-        "Document vide ou trop volumineux"
-      );
+    if (!buffer.length || buffer.length > 10 * 1024 * 1024) {
+      return failure(res, 400, "Document vide ou trop volumineux");
     }
 
     const pdfParse = require("pdf-parse");
     const parsed = await pdfParse(buffer);
 
-    const documentText = String(
-      parsed.text || ""
-    ).slice(0, 30000);
+    const documentText = String(parsed.text || "")
+      .slice(0, 30000);
 
     if (!documentText.trim()) {
-      return failure(
-        res,
-        400,
-        "Aucun texte lisible dans ce PDF"
-      );
+      return failure(res, 400, "Aucun texte lisible dans ce PDF");
     }
 
     const question = String(
@@ -1175,9 +1060,7 @@ app.post("/api/chat/pdf", authenticate, async (req, res) => {
       },
       {
         role: "user",
-        content:
-          `${question}\n\nCONTENU DU DOCUMENT :\n` +
-          documentText
+        content: `${question}\n\nCONTENU DU DOCUMENT :\n${documentText}`
       }
     ]);
 
@@ -1201,12 +1084,7 @@ app.post("/api/chat/pdf", authenticate, async (req, res) => {
 
   } catch (error) {
     console.error("PDF:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Impossible de lire ce document PDF"
-    );
+    return failure(res, 500, "Impossible de lire ce document PDF");
   }
 });
 
@@ -1248,12 +1126,7 @@ app.post("/api/contact", authenticate, async (req, res) => {
 
   } catch (error) {
     console.error("CONTACT:", error.message);
-
-    return failure(
-      res,
-      500,
-      "Impossible d'envoyer le message"
-    );
+    return failure(res, 500, "Impossible d'envoyer le message");
   }
 });
 
@@ -1261,35 +1134,26 @@ app.post("/api/contact", authenticate, async (req, res) => {
 // HISTORIQUE DU SUPPORT
 // ==========================================
 
-app.get(
-  "/api/contact/messages",
-  authenticate,
-  async (req, res) => {
-    try {
-      const { data, error } = await supabase
-        .from("taya_v19_support_messages")
-        .select("id,user_id,sender_id,sender_role,message,created_at,read_at")
-        .eq("user_id", req.user.id)
-        .order("created_at", { ascending: true })
-        .limit(200);
+app.get("/api/contact/messages", authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("taya_v19_support_messages")
+      .select("id,user_id,sender_id,sender_role,message,created_at,read_at")
+      .eq("user_id", req.user.id)
+      .order("created_at", { ascending: true })
+      .limit(200);
 
-      if (error) throw error;
+    if (error) throw error;
 
-      return success(res, {
-        messages: data || []
-      });
+    return success(res, {
+      messages: data || []
+    });
 
-    } catch (error) {
-      console.error("SUPPORT HISTORY:", error.message);
-
-      return failure(
-        res,
-        500,
-        "Impossible de charger les messages"
-      );
-    }
+  } catch (error) {
+    console.error("SUPPORT HISTORY:", error.message);
+    return failure(res, 500, "Impossible de charger les messages");
   }
-);
+});
 
 // ==========================================
 // ADMIN : UTILISATEURS
@@ -1316,12 +1180,7 @@ app.get(
 
     } catch (error) {
       console.error("ADMIN USERS:", error.message);
-
-      return failure(
-        res,
-        500,
-        "Impossible de charger les utilisateurs"
-      );
+      return failure(res, 500, "Impossible de charger les utilisateurs");
     }
   }
 );
@@ -1350,12 +1209,7 @@ app.get(
 
     } catch (error) {
       console.error("ADMIN MESSAGES:", error.message);
-
-      return failure(
-        res,
-        500,
-        "Impossible de charger les messages"
-      );
+      return failure(res, 500, "Impossible de charger les messages");
     }
   }
 );
@@ -1371,7 +1225,6 @@ app.post(
   async (req, res) => {
     try {
       const userId = req.params.userId;
-
       const message = String(
         req.body?.message || ""
       ).trim();
@@ -1410,12 +1263,7 @@ app.post(
 
     } catch (error) {
       console.error("ADMIN REPLY:", error.message);
-
-      return failure(
-        res,
-        500,
-        "Impossible d'envoyer la réponse"
-      );
+      return failure(res, 500, "Impossible d'envoyer la réponse");
     }
   }
 );
@@ -1448,12 +1296,7 @@ app.patch(
 
     } catch (error) {
       console.error("ADMIN READ:", error.message);
-
-      return failure(
-        res,
-        500,
-        "Impossible de modifier le message"
-      );
+      return failure(res, 500, "Impossible de modifier le message");
     }
   }
 );
@@ -1482,12 +1325,7 @@ app.post(
 
     } catch (error) {
       console.error("PRESENCE:", error.message);
-
-      return failure(
-        res,
-        500,
-        "Impossible d'actualiser la présence"
-      );
+      return failure(res, 500, "Impossible d'actualiser la présence");
     }
   }
 );
@@ -1516,12 +1354,7 @@ app.get(
 
     } catch (error) {
       console.error("ADMIN PRESENCE:", error.message);
-
-      return failure(
-        res,
-        500,
-        "Impossible de charger les présences"
-      );
+      return failure(res, 500, "Impossible de charger les présences");
     }
   }
 );
@@ -1541,9 +1374,7 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
   console.error("SERVER ERROR:", err.message);
 
-  if (res.headersSent) {
-    return next(err);
-  }
+  if (res.headersSent) return next(err);
 
   return failure(
     res,

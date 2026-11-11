@@ -1,6 +1,6 @@
 {
   "name": "taya-ai-api",
-  "version": "21.0.1",
+  "version": "22.0.0",
   "description": "Backend officiel de TAYA IA by Maruce Soldado",
   "main": "server.js",
   "scripts": {
